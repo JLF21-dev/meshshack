@@ -253,3 +253,52 @@ def test_blanks_sort_last_in_both_directions(store, qapp, tmp_path):
             assert nodes.table.item(0, snr).text() == "3.0", order
     finally:
         win.close()
+
+
+def test_chat_opens_at_last_read_or_newest(store, qapp, tmp_path):
+    def settle(ms=400):
+        deadline = time.time() + ms / 1000
+        while time.time() < deadline:
+            qapp.processEvents()
+
+    ids = []
+    for i in range(40):
+        ids.append(store.record_packet({"from": RELAY, "to": ME, "id": 500 + i, "decoded": {
+            "portnum": "TEXT_MESSAGE_APP", "text": f"message {i}"}}, now=time.time() - 4000 + i * 60))
+    rows = store.thread(peer=RELAY)
+    win = MainWindow(tmp_path / "test.db")
+    try:
+        win.resize(900, 500)
+        win.show()
+        chat, bar = win.chat, win.chat.view.verticalScrollBar()
+
+        # 15 read, 25 unread: the last read message is at the top, "New messages" below it.
+        win.settings.setValue(f"read/dm:{RELAY}", rows[14]["id"])
+        win.open_dm(RELAY)
+        settle()
+        assert 0 < bar.value() < bar.maximum()
+        top = chat.view.cursorForPosition(chat.view.viewport().rect().topLeft()).block().text()
+        assert "New messages" in chat.view.toPlainText()
+        assert chat.view.toPlainText().index("message 14") < chat.view.toPlainText().index("New messages")
+        assert "message 13" not in top  # scrolled past the older ones
+
+        # Nothing unread: opens at the newest messages.
+        win.open_dm(DEST)
+        settle()
+        win.settings.setValue(f"read/dm:{RELAY}", rows[-1]["id"])
+        win.open_dm(RELAY)
+        settle()
+        assert bar.maximum() > 0 and bar.value() == bar.maximum()
+
+        # At the bottom, a new message keeps you there; scrolled up, it doesn't move you.
+        store.record_packet({"from": RELAY, "to": ME, "id": 999, "decoded": {"portnum": "TEXT_MESSAGE_APP", "text": "new"}})
+        win.dataChanged.emit()
+        settle()
+        assert bar.value() == bar.maximum()
+        bar.setValue(10)
+        store.record_packet({"from": RELAY, "to": ME, "id": 1000, "decoded": {"portnum": "TEXT_MESSAGE_APP", "text": "newer"}})
+        win.dataChanged.emit()
+        settle()
+        assert bar.value() == 10
+    finally:
+        win.close()

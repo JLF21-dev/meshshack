@@ -3,7 +3,7 @@
 import time
 from html import escape
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QPalette
 from PySide6.QtWidgets import (
     QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QPushButton, QSplitter,
@@ -35,6 +35,10 @@ class ChatTab(QWidget):
         self.current = ("channel", 0)
         self.extra_dms = set()  # DM conversations opened from the map/nodes before any message exists
         self._rendered = None  # (conversation, signature) of what the thread view shows
+        self._opened_marker = None  # read marker when the current conversation was opened (for "New messages")
+        self._scroll_target = None  # where the thread view should end up once its layout settles
+        self._scroll_deadline = 0.0
+        self._scroll_when_shown = False
         self._sending = False
 
         self.conv_list = QListWidget()
@@ -46,6 +50,9 @@ class ChatTab(QWidget):
         self.header.setWordWrap(True)
         self.view = QTextBrowser()
         self.view.setOpenLinks(False)
+        # QTextBrowser lays text out after setHtml returns, so the scroll range grows afterwards;
+        # keep applying the target while it does (see _scroll_to).
+        self.view.verticalScrollBar().rangeChanged.connect(lambda *_: self._apply_scroll())
 
         self.input = QLineEdit()
         self.input.setPlaceholderText("Type a message…")
@@ -157,9 +164,16 @@ class ChatTab(QWidget):
     def showEvent(self, event):
         super().showEvent(event)
         self.refresh()
+        if self._scroll_when_shown:  # rendered while hidden (e.g. started in the tray): lay out, then scroll
+            self._scroll_when_shown = False
+            self._scroll_to(self._scroll_target)
 
     def _render_thread(self):
         kind, key = self.current
+        switched = self._rendered is None or self._rendered[0] != self.current
+        if switched:
+            # Remember how far you'd read before this view marks the conversation read.
+            self._opened_marker = self._read_marker(self.current)
         rows = self.store.thread(channel=key) if kind == "channel" else self.store.thread(peer=key)
         if rows and self._is_being_read():
             self.win.settings.setValue(f"read/{conv_key(kind, key)}", rows[-1]["id"])
@@ -168,14 +182,48 @@ class ChatTab(QWidget):
         signature = tuple((r["id"], r["status"]) for r in rows)
         if self._rendered == (self.current, signature):
             return
-        switched = self._rendered is None or self._rendered[0] != self.current
         self._rendered = (self.current, signature)
 
         bar = self.view.verticalScrollBar()
         at_bottom = bar.value() >= bar.maximum() - 4
         position = bar.value()
-        self.view.setHtml(self._thread_html(rows))
-        bar.setValue(bar.maximum() if switched or at_bottom else position)
+        self.view.setHtml(self._thread_html(rows, self._opened_marker))
+        if switched:
+            self._scroll_to(self._opening_target(rows, self._opened_marker))
+        else:  # new messages: stay at the bottom if you were there, otherwise don't move
+            self._scroll_to(("bottom",) if at_bottom else ("position", position))
+
+    @staticmethod
+    def _opening_target(rows, marker):
+        """Where a conversation opens: with unread messages, the last one you'd read at the top
+        (the unread ones follow below the "New messages" line); otherwise the newest at the bottom."""
+        unread = [m for m in rows if m["id"] > (marker or 0) and m["direction"] == "in"]
+        if not unread:
+            return ("bottom",)
+        read = [m for m in rows if m["id"] <= (marker or 0)]
+        return ("anchor", f"m{read[-1]['id']}") if read else ("top",)
+
+    def _scroll_to(self, target):
+        self._scroll_target = target
+        self._scroll_deadline = time.monotonic() + 1.0
+        if not self.view.isVisible():
+            self._scroll_when_shown = True
+        self._apply_scroll()
+        QTimer.singleShot(0, self._apply_scroll)
+
+    def _apply_scroll(self):
+        target = self._scroll_target
+        if target is None or time.monotonic() > self._scroll_deadline:
+            return
+        bar = self.view.verticalScrollBar()
+        if target[0] == "bottom":
+            bar.setValue(bar.maximum())
+        elif target[0] == "top":
+            bar.setValue(0)
+        elif target[0] == "anchor":
+            self.view.scrollToAnchor(target[1])  # puts the anchor at the top of the view
+        else:
+            bar.setValue(min(target[1], bar.maximum()))
 
     def _render_header(self):
         kind, key = self.current
@@ -191,8 +239,12 @@ class ChatTab(QWidget):
                     detail += f" · {row['hops_away']} hop{'s' if row['hops_away'] != 1 else ''} away"
         self.header.setText(f"<b style='font-size:14px'>{title}</b><br><span style='color:gray'>{escape(detail)}</span>")
 
-    def _thread_html(self, rows):
+    def _thread_html(self, rows, unread_after=None):
+        """unread_after: read marker at opening; a "New messages" line goes above the first unread."""
         dark = self.palette().color(QPalette.Window).lightness() < 128
+        new_color = "#f28b82" if dark else "#c5221f"
+        divider_done = unread_after is None or not any(
+            m["id"] > unread_after and m["direction"] == "in" for m in rows)
         in_bg, out_bg = ("#2d3138", "#1d4a80") if dark else ("#eceff3", "#d4e6ff")
         meta_color = "#9aa0a6" if dark else "#5f6368"
         if not rows:
@@ -201,6 +253,11 @@ class ChatTab(QWidget):
         parts = []
         last_day = None
         for m in rows:
+            if not divider_done and m["id"] > unread_after and m["direction"] == "in":
+                parts.append(f"<p align='center' style='color:{new_color}; font-weight:bold'>"
+                             f"─────  New messages  ─────</p>")
+                divider_done = True
+            parts.append(f"<a name='m{m['id']}'></a>")
             day = time.strftime("%Y-%m-%d", time.localtime(m["logged_at"]))
             if day != last_day:
                 parts.append(f"<p align='center' style='color:{meta_color}'>{escape(fmt_day(m['logged_at']))}</p>")

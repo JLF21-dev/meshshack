@@ -120,7 +120,11 @@ sed "s#@MESHSHACK_DIR@#$PWD#g" desktop/meshshack-autostart.desktop > ~/.config/a
 ```
 
 - **Chat:** your radio's channels and direct-message conversations with
-  unread counts. Messages show SNR, RSSI and hops. Your sent messages show
+  unread counts. A conversation with unread messages opens with the last one
+  you'd read at the top and a "New messages" line above the rest; otherwise
+  it opens at the newest. New arrivals keep you at the bottom if you're
+  there, and don't move you if you've scrolled up. Messages show hops and,
+  for messages heard directly, SNR and RSSI. Your sent messages show
   delivery status: `…` sending, `✓` relayed by a neighbor, `✓✓` delivered
   (direct messages only), `✗` failed. The send box counts bytes against
   the 200-byte limit.
