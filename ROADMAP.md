@@ -63,6 +63,12 @@ Picked up when work resumes. The ground rule above applies to every item.
 - [ ] A radio layer ready for MeshCore support.
 - [ ] A formal API description (OpenAPI).
 
+**Ideas**
+- [ ] Coverage analysis: SNR/RSSI against distance, from node positions.
+- [ ] Export to InfluxDB/Grafana.
+- [ ] Device settings, stage 2: region and modem preset (with strong warnings).
+- [ ] Replies and emoji reactions from the chat view.
+
 **Smaller items noted along the way**
 - [ ] Database retention/pruning. It grows about 3 MB a day, which is fine
   for now, and the history feeds the charts.

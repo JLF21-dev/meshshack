@@ -1,16 +1,40 @@
 # MeshShack — a desktop station for Meshtastic
 
-MeshShack is a general-purpose computer interface to a Meshtastic radio: recording,
-monitoring, messaging, and radio control, with more capabilities added over time
-(and possibly MeshCore support later).
+[![tests](https://github.com/JLF21-dev/meshshack/actions/workflows/tests.yml/badge.svg)](https://github.com/JLF21-dev/meshshack/actions/workflows/tests.yml)
+[![License: GPL v3](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
 
-Connects to a Meshtastic radio over USB and records everything it hears into a
-SQLite database: nodes, text messages, positions, telemetry, and every raw
-packet (including encrypted ones it can't read). Reconnects on its own if
-the radio is unplugged or reboots.
+MeshShack turns a computer with a USB-connected [Meshtastic](https://meshtastic.org)
+radio into a station: an always-on logger that records everything the radio
+hears, and a desktop app for chat, a live map, node history, channels and
+radio settings. It's built to be a good neighbor on a shared mesh: every
+transmission goes through an airtime gatekeeper with conservative limits and
+a kill switch.
 
-A desktop app (`meshshack gui`) adds chat, a map of nodes, a node table with
-traceroute/requests, and basic device controls.
+![The map: nodes colored by when they were last heard, shaped by how they're heard](docs/screenshots/map.png)
+
+- **Always-on logger:** a systemd service that owns the radio's USB port and
+  records every packet (even encrypted ones it can't read), nodes, messages,
+  positions and telemetry to SQLite. Reconnects on its own.
+- **Desktop app** (system tray): chat with delivery status, a map with honest
+  position precision, a node table with direct-signal columns, per-node history
+  charts, channel management with QR sharing, and radio settings.
+- **Careful with airtime:** budgets per sender, back-off when the channel is
+  busy, and a kill switch; see [Airtime](#airtime).
+- **API for other apps:** read endpoints, a live event stream, and scoped,
+  revocable tokens; see [API for other apps](#api-for-other-apps).
+- **Export:** nodes (CSV/KML), messages and telemetry (CSV), position history (GPX).
+
+Status: 0.1, in daily use on a Heltec V4 (firmware 2.7) on Linux. Plans and the
+backlog are in [ROADMAP.md](ROADMAP.md).
+
+| Nodes, with a node's history | This station's channel load |
+|---|---|
+| ![Nodes tab with charts](docs/screenshots/nodes.png) | ![Device tab with station history](docs/screenshots/device.png) |
+| **Chat** | **Channels** |
+| ![Chat](docs/screenshots/chat.png) | ![Channels](docs/screenshots/channels.png) |
+
+The screenshots come from `dev/demo_gui.py`, which fills a demo database with
+made-up nodes.
 
 ## How it fits together
 
@@ -26,7 +50,6 @@ app reads the database directly and sends messages and commands through the
 API. The API's token is in `hub.json` next to the database (readable only by
 you) and changes each time the logger starts.
 
-Plans, rules for putting traffic on the mesh, and the backlog: [ROADMAP.md](ROADMAP.md).
 
 ## Setup
 
@@ -295,9 +318,17 @@ The tests build real Meshtastic protobuf packets and pass them through the
 library's own decoding code, drive the API against a fake radio, and open the
 desktop app offscreen, so no radio or display is needed.
 
-## Ideas
+## Contributing
 
-- Export to InfluxDB/Grafana (shared data store in the project README)
-- Coverage analysis: SNR/RSSI vs. distance, using node positions
-- Device controls stage 2: region, modem preset, channels
-- Replies and emoji reactions from the chat view
+Issues and pull requests are welcome. Two ground rules:
+
+- **Anything that can transmit goes through the gatekeeper** (`meshshack/airtime.py`),
+  and new automatic sending needs a strong reason, a dry run, and a hard minimum
+  interval. No auto-replies to incoming messages. See [ROADMAP.md](ROADMAP.md).
+- Run `pytest` before sending changes. The tests need no radio and no display.
+
+## License
+
+GNU General Public License v3.0 or later; see [LICENSE](LICENSE). Bundled
+third-party code (Leaflet, BSD-2-Clause) and map data attribution are listed
+in [NOTICES.md](NOTICES.md).

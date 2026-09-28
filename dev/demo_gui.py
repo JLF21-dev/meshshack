@@ -28,7 +28,8 @@ for num, short, long, hw, role, lat, lon, age, snr, rssi, hops, batt in nodes:
     store.record_node_info({"num": num, "user": {"id": f"!{num:08x}", "longName": long, "shortName": short, "hwModel": hw, "role": role},
                             "position": {"latitude": lat, "longitude": lon}, "lastHeard": now - age, "snr": snr, "hopsAway": hops,
                             "deviceMetrics": {"batteryLevel": batt} if batt else {}})
-    if rssi: store._conn.execute("UPDATE nodes SET last_rssi=? WHERE num=?", (rssi, num)); store._conn.commit()
+    if rssi and hops == 0:  # signal columns only describe nodes heard directly
+        store._conn.execute("UPDATE nodes SET last_rssi=? WHERE num=?", (rssi, num)); store._conn.commit()
 def rx(sender, text, age, to=BROADCAST_NUM, ch=0, snr=6.0, rssi=-95, hs=3, hl=2):
     store.record_packet({"from": sender, "to": to, "id": int(now - age), "channel": ch, "rxSnr": snr, "rxRssi": rssi, "hopStart": hs, "hopLimit": hl,
                          "decoded": {"portnum": "TEXT_MESSAGE_APP", "text": text}}, now=now - age)
@@ -47,6 +48,28 @@ for i in range(6):
     store.record_packet({"from": 0x33333333, "to": BROADCAST_NUM, "id": 5000 + i, "decoded": {"portnum": "POSITION_APP",
         "position": {"latitude": 40.11 + i * 0.004, "longitude": -88.24 + i * 0.004}}}, now=now - 3000 + i * 400)
 
+# A day of history for the charts: this station's own once-a-minute reports (sampled every
+# 10 minutes here), and a solar router whose battery charges by day and is heard directly.
+import math, random
+random.seed(73)
+for k in range(144):
+    t = now - (143 - k) * 600
+    load = 6 + 3 * math.sin(k / 144 * 2 * math.pi * 2) + random.uniform(-1.5, 1.5) + (9 if k in (61, 62) else 0)
+    store.record_packet({"from": ME, "to": BROADCAST_NUM, "id": 20000 + k, "decoded": {"portnum": "TELEMETRY_APP",
+        "telemetry": {"deviceMetrics": {"batteryLevel": 101, "voltage": round(4.18 + random.uniform(-0.01, 0.01), 3),
+                                        "channelUtilization": round(max(load, 0.5), 2),
+                                        "airUtilTx": round(1.2 + 0.4 * math.sin(k / 20) + random.uniform(0, 0.2), 2)}}}},
+        now=t, local=True)
+for h in range(24):
+    t = now - (23 - h) * 3600
+    sun = max(0.0, math.sin((h - 6) / 12 * math.pi))
+    store.record_packet({"from": 0x11111111, "to": BROADCAST_NUM, "id": 30000 + h, "rxSnr": round(6 + random.uniform(-2.5, 2), 2),
+        "rxRssi": -90 + random.randint(-4, 4), "hopStart": 3, "hopLimit": 3, "decoded": {"portnum": "TELEMETRY_APP",
+        "telemetry": {"deviceMetrics": {"batteryLevel": int(78 + 20 * sun), "voltage": round(3.85 + 0.3 * sun, 3),
+                                        "channelUtilization": round(5 + random.uniform(-1, 2), 2), "airUtilTx": round(0.8 + random.uniform(0, 0.4), 2)}}}},
+        now=t)
+store.set_node_flags(0x11111111, favorite=True)
+
 iface = FakeInterface()
 iface.localNode.localConfig.device.role = 12  # CLIENT_BASE
 iface.localNode.localConfig.position.position_broadcast_secs = 900
@@ -60,7 +83,7 @@ from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 from meshshack.gui.app import MainWindow
 app = QApplication([])
-win = MainWindow(db); win.resize(1200, 780); win.show()
+win = MainWindow(db); win.resize(1200, 820); win.show()
 steps = []
 def shot(name):
     win.grab().save(str(out / f"gui_{name}.png")); print("saved", name)
@@ -69,7 +92,15 @@ def seq(i=0):
     if i < len(plan):
         idx, name = plan[i]
         win.tabs.setCurrentIndex(idx)
-        QTimer.singleShot(5000 if name == "map" else 1500, lambda: (shot(name), seq(i + 1)))
+        if name == "nodes":  # show the solar router's details and charts
+            for r in range(win.nodes.table.rowCount()):
+                if win.nodes.table.item(r, 0).data(0x0100) == 0x11111111:
+                    win.nodes.table.selectRow(r)
+            win.nodes.detail_tabs.setCurrentIndex(1)
+        if name == "device":  # scroll down to this station's history
+            from PySide6.QtWidgets import QScrollArea
+            QTimer.singleShot(800, lambda: (lambda b: b.setValue(b.maximum()))(win.device.findChild(QScrollArea).verticalScrollBar()))
+        QTimer.singleShot(5000 if name in ("map", "nodes", "device") else 1500, lambda: (shot(name), seq(i + 1)))
     else:
         # DM view + send via real API path
         win.open_dm(0x33333333); win.chat.input.setText("See you there!")
