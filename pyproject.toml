@@ -1,10 +1,12 @@
 [build-system]
-requires = ["setuptools>=64"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "meshshack"
 version = "0.1.0"
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE", "NOTICES.md"]
 description = "MeshShack: a desktop station for Meshtastic: logging, monitoring, messaging, and radio control"
 requires-python = ">=3.10"
 dependencies = ["meshtastic>=2.7"]
