@@ -1,0 +1,223 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="leaflet.css">
+<script src="leaflet.js"></script>
+<style>
+  html, body, #map { height: 100%; margin: 0; }
+  .popup-title { font-size: 14px; font-weight: bold; }
+  .popup-sub { color: #666; margin-bottom: 4px; }
+  .popup table td { padding: 0 8px 0 0; }
+  .popup button { margin: 6px 4px 0 0; }
+  .legend { background: rgba(255,255,255,0.9); padding: 6px 8px; border-radius: 4px; font: 12px sans-serif; line-height: 18px; }
+  .legend svg { vertical-align: -2px; margin-right: 6px; }
+  .legend b { display: block; margin-top: 4px; }
+  .legend b:first-child { margin-top: 0; }
+  .node-icon { background: none; border: none; }
+  .label { background: transparent; border: none; box-shadow: none; font-weight: bold; text-shadow: 0 0 3px #fff, 0 0 3px #fff; }
+  .label::before { display: none; }  /* no pointer arrow on the always-on name labels */
+</style>
+</head>
+<body>
+<div id="map"></div>
+<script>
+// Default view until nodes with positions arrive: the UIUC Electrical and Computer Engineering Building.
+const map = L.map('map').setView([40.1149, -88.2281], 9);
+L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  maxZoom: 19,
+  attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+}).addTo(map);
+
+const markers = new Map();  // node num -> marker
+const trails = L.layerGroup().addTo(map);
+const areas = L.layerGroup().addTo(map);  // precision cells of rounded positions
+let fitted = false;
+
+const legend = L.control({ position: 'bottomleft' });
+legend.onAdd = () => {
+  const div = L.DomUtil.create('div', 'legend');
+  const row = (shape, fill, text) => shapeSvg(shape, fill, 12, '#555', 1) + text + '<br>';
+  div.innerHTML = '<b>Last heard</b>' +
+    row('circle', '#2e7d32', 'Under 1 hour') +
+    row('circle', '#f9a825', 'Under 24 hours') +
+    row('circle', '#9e9e9e', 'Older') +
+    '<b>Heard via</b>' +
+    row('me', '#1a73e8', 'This station') +
+    row('circle', '#fff', 'Radio') +
+    row('square', '#fff', 'Internet (MQTT)') +
+    row('triangle', '#fff', 'Both radio and internet') +
+    row('diamond', '#fff', 'Not logged yet (radio\'s saved list)') +
+    '<b>Position</b>' +
+    '<svg width="12" height="12" viewBox="0 0 12 12"><rect x="1" y="1" width="10" height="10" fill="rgba(0,0,0,0.06)" ' +
+    'stroke="#555" stroke-dasharray="2 2"/></svg>Rounded: node is somewhere in the box';
+  return div;
+};
+legend.addTo(map);
+
+function color(node) {
+  if (node.is_me) return '#1a73e8';
+  if (node.age_s == null) return '#9e9e9e';
+  if (node.age_s < 3600) return '#2e7d32';
+  if (node.age_s < 86400) return '#f9a825';
+  return '#9e9e9e';
+}
+
+// Shape = how the node's traffic reaches us (see map_tab.path_kind); color = how recently.
+const SHAPE_FOR_PATH = { radio: 'circle', mqtt: 'square', both: 'triangle', unknown: 'diamond' };
+
+function starPoints(cx, cy, outer, inner) {
+  const pts = [];
+  for (let i = 0; i < 10; i++) {
+    const r = i % 2 ? inner : outer, a = Math.PI / 5 * i - Math.PI / 2;
+    pts.push((cx + r * Math.cos(a)).toFixed(2) + ',' + (cy + r * Math.sin(a)).toFixed(2));
+  }
+  return pts.join(' ');
+}
+
+// Drawn in a 20x20 box, sized to roughly equal visual weight.
+function shapeSvg(shape, fill, size, stroke = '#fff', strokeWidth = 2) {
+  const body = {
+    circle: '<circle cx="10" cy="10" r="7"/>',
+    square: '<rect x="3.5" y="3.5" width="13" height="13" rx="1.5"/>',
+    triangle: '<polygon points="10,2.5 18,16.5 2,16.5" stroke-linejoin="round"/>',
+    diamond: '<polygon points="10,1.5 18,10 10,18.5 2,10" stroke-linejoin="round"/>',
+    me: `<polygon points="${starPoints(10, 10.5, 9, 4)}" stroke-linejoin="round"/>`,
+  }[shape];
+  return `<svg width="${size}" height="${size}" viewBox="0 0 20 20">` +
+    `<g fill="${fill}" stroke="${stroke}" stroke-width="${strokeWidth * 20 / size}">${body}</g></svg>`;
+}
+
+// offset: [dx, dy] pixels, to fan out nodes that share one point (see fanOffsets).
+function nodeIcon(n, offset) {
+  const shape = n.is_me ? 'me' : (SHAPE_FOR_PATH[n.path] || 'circle');
+  const size = n.is_me ? 24 : 18;
+  const [dx, dy] = offset;
+  return L.divIcon({
+    className: 'node-icon', html: shapeSvg(shape, color(n), size), iconSize: [size, size],
+    iconAnchor: [size / 2 - dx, size / 2 - dy], popupAnchor: [dx, dy - size / 2],
+    tooltipAnchor: labelSide(offset) === 'left' ? [dx - size / 2, dy] : [dx + size / 2, dy],
+  });
+}
+
+// Labels always draw above markers, so in a fanned group the left-hand markers get their
+// name on the left; otherwise it would cover the neighbor on its right.
+function labelSide(offset) {
+  return offset[0] < 0 ? 'left' : 'right';
+}
+
+function bindLabel(m, offset) {
+  const side = labelSide(offset);
+  m.unbindTooltip();
+  m.bindTooltip('', { permanent: true, direction: side, offset: [side === 'left' ? -2 : 2, 0], className: 'label' });
+}
+
+// Rounded positions put every node in the same precision cell on the identical point.
+// Spread each such group around a small ring (fixed pixels, so it holds at every zoom).
+function fanOffsets(nodes) {
+  const groups = new Map();
+  for (const n of nodes) {
+    const key = n.lat + ',' + n.lon;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(n);
+  }
+  const offsets = new Map();
+  for (const group of groups.values()) {
+    group.sort((a, b) => a.num - b.num);  // stable placement across refreshes
+    const radius = group.length > 1 ? 10 + 3 * group.length : 0;
+    group.forEach((n, i) => {
+      const angle = 2 * Math.PI * i / group.length - Math.PI / 2;
+      offsets.set(n.num, [Math.round(radius * Math.cos(angle)), Math.round(radius * Math.sin(angle))]);
+    });
+  }
+  return offsets;
+}
+
+function heardViaText(n) {
+  const rf = n.rf_packets, mqtt = n.mqtt_packets;
+  const pk = k => k + (k === 1 ? ' packet' : ' packets');
+  if (rf && mqtt) return `Radio ${pk(rf)}, internet ${pk(mqtt)}`;
+  if (mqtt) return `Internet (MQTT), ${pk(mqtt)}`;
+  if (rf) return `Radio, ${pk(rf)}`;
+  return 'Nothing logged yet';
+}
+
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+// Actions go back to Python through the console (see MapPage.javaScriptConsoleMessage).
+function act(action, num) {
+  console.log('meshshack:' + JSON.stringify({ action, num }));
+}
+
+function popupHtml(n) {
+  const rows = [['Last heard', n.age_text], ['Heard via', n.is_me ? null : heardViaText(n)],
+    ['Position', n.accuracy], ['Hardware', n.hw_model], ['Role', n.role],
+    ['Direct SNR', n.snr != null ? n.snr.toFixed(1) + ' dB' : null], ['Direct RSSI', n.rssi],
+    ['Hops', n.hops], ['Battery', n.battery != null ? n.battery + '%' : null],
+    ['Distance', n.distance_km != null ? (n.approx_distance ? '≈ ' : '') + n.distance_km.toFixed(1) + ' km' : null]]
+    .filter(r => r[1] != null && r[1] !== '')
+    .map(r => `<tr><td>${esc(r[0])}</td><td>${esc(r[1])}</td></tr>`).join('');
+  const buttons = n.is_me ? '' :
+    `<button onclick="act('dm', ${n.num})">Message</button>` +
+    `<button onclick="act('traceroute', ${n.num})">Traceroute</button>` +
+    `<button onclick="act('position', ${n.num})">Request position</button>`;
+  return `<div class="popup"><div class="popup-title">${esc(n.short_name || n.id)}</div>` +
+    `<div class="popup-sub">${esc(n.long_name || '')} · ${esc(n.id)}</div>` +
+    `<table>${rows}</table>${buttons}</div>`;
+}
+
+window.meshshack = {
+  update(data) {
+    map.invalidateSize();  // the tab may have been hidden (zero size) since the last update
+    const seen = new Set();
+    const offsets = fanOffsets(data.nodes);
+    areas.clearLayers();
+    const drawnCells = new Set();  // nodes sharing a cell share one box, colored by the freshest (listed first)
+    for (const n of data.nodes) {
+      seen.add(n.num);
+      if (data.show_areas && n.cell && !drawnCells.has(String(n.cell))) {
+        drawnCells.add(String(n.cell));
+        L.rectangle(n.cell, { color: color(n), weight: 1.5, opacity: 0.75, dashArray: '5 4',
+                              fillOpacity: 0.08, interactive: false }).addTo(areas);
+      }
+      const offset = offsets.get(n.num);
+      const iconKey = [n.is_me, n.path, color(n), offset].join('|');
+      let m = markers.get(n.num);
+      if (!m) {
+        m = L.marker([n.lat, n.lon], { icon: nodeIcon(n, offset), zIndexOffset: n.is_me ? 1000 : 0 }).addTo(map);
+        m.iconKey = iconKey;
+        m.bindPopup('');
+        bindLabel(m, offset);
+        markers.set(n.num, m);
+      }
+      // Update in place so an open popup stays open across refreshes; only redraw an icon that changed.
+      m.setLatLng([n.lat, n.lon]);
+      if (m.iconKey !== iconKey) { m.setIcon(nodeIcon(n, offset)); bindLabel(m, offset); m.iconKey = iconKey; }
+      m.setPopupContent(popupHtml(n));
+      m.setTooltipContent(esc(n.short_name || n.id));
+    }
+    for (const [num, m] of markers) {
+      if (!seen.has(num)) { m.remove(); markers.delete(num); }
+    }
+    trails.clearLayers();
+    for (const track of data.tracks) {
+      if (track.points.length > 1) {
+        L.polyline(track.points, { color: '#5c6bc0', weight: 2, opacity: 0.6 }).addTo(trails);
+      }
+    }
+    if (!fitted && data.nodes.length && map.getSize().x > 0) {
+      this.fit();
+      fitted = true;
+    }
+  },
+  fit() {
+    const pts = [...markers.values()].map(m => m.getLatLng());
+    if (pts.length === 1) map.setView(pts[0], 11);
+    else if (pts.length > 1) map.fitBounds(L.latLngBounds(pts), { padding: [40, 40], maxZoom: 13 });
+  },
+};
+</script>
+</body>
+</html>

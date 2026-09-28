@@ -1,0 +1,11 @@
+[Unit]
+Description=MeshShack logger (owns the Meshtastic radio's USB port)
+After=network.target
+
+[Service]
+ExecStart=@MESHSHACK_DIR@/.venv/bin/meshshack run
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target

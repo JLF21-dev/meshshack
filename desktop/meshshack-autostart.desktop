@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=MeshShack (tray)
+Comment=Start MeshShack in the system tray at login; the logger service records regardless
+Exec=@MESHSHACK_DIR@/.venv/bin/meshshack gui --tray
+Icon=@MESHSHACK_DIR@/meshshack/gui/assets/icon.svg
+Terminal=false
+X-GNOME-Autostart-enabled=true
+X-GNOME-Autostart-Delay=5

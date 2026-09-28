@@ -1,0 +1,303 @@
+# MeshShack — a desktop station for Meshtastic
+
+MeshShack is a general-purpose computer interface to a Meshtastic radio: recording,
+monitoring, messaging, and radio control, with more capabilities added over time
+(and possibly MeshCore support later).
+
+Connects to a Meshtastic radio over USB and records everything it hears into a
+SQLite database: nodes, text messages, positions, telemetry, and every raw
+packet (including encrypted ones it can't read). Reconnects on its own if
+the radio is unplugged or reboots.
+
+A desktop app (`meshshack gui`) adds chat, a map of nodes, a node table with
+traceroute/requests, and basic device controls.
+
+## How it fits together
+
+```
+ Heltec (USB) ── meshshack run ──> SQLite database <── meshshack gui (reads)
+                      │                                   │
+                      └── localhost API (127.0.0.1:8765) <┘ (sends, device commands)
+```
+
+Only one program can hold the USB port, so `meshshack run` is the hub: it owns
+the radio, logs everything, and serves a small API bound to 127.0.0.1. The
+app reads the database directly and sends messages and commands through the
+API. The API's token is in `hub.json` next to the database (readable only by
+you) and changes each time the logger starts.
+
+Plans, rules for putting traffic on the mesh, and the backlog: [ROADMAP.md](ROADMAP.md).
+
+## Setup
+
+```bash
+git clone https://github.com/JLF21-dev/meshshack.git
+cd meshshack
+python3 -m venv .venv
+.venv/bin/pip install -e '.[dev,gui]'    # drop ",gui" for a headless logger
+```
+
+Linux only lets members of the `dialout` group open serial ports:
+
+```bash
+sudo usermod -aG dialout $USER    # then log out and back in
+```
+
+Plug in the radio and check that a port appears: `ls /dev/ttyACM* /dev/ttyUSB*`.
+ESP32-S3 boards like the Heltec V3/V4 show up as `/dev/ttyACM0`. If nothing
+appears, try another USB cable, since many are power-only.
+
+## Usage
+
+```bash
+.venv/bin/meshshack run                     # auto-detect the radio and log until Ctrl-C
+.venv/bin/meshshack run --port /dev/ttyACM0 # or name the port
+
+.venv/bin/meshshack nodes --since 24h       # who's been heard, with SNR/RSSI/hops/battery
+.venv/bin/meshshack messages -n 20          # recent text messages
+.venv/bin/meshshack packets --type POSITION_APP
+.venv/bin/meshshack packets --json -n 5     # full packet contents
+.venv/bin/meshshack telemetry --kind deviceMetrics
+.venv/bin/meshshack stats --since 7d        # packet counts by type
+.venv/bin/meshshack events                  # connect/disconnect history
+.venv/bin/meshshack export nodes -f kml -o nodes.kml          # also csv
+.venv/bin/meshshack export positions --since 7d -o tracks.gpx
+.venv/bin/meshshack export messages -o messages.csv           # telemetry too
+```
+
+The database defaults to `~/.local/share/meshshack/meshshack.db`; override it with
+`--db PATH` or the `MESHSHACK_DB` environment variable. Query commands can run
+while the logger is running.
+
+Only one program can hold the USB port at a time. While `meshshack run` is
+connected, use the phone app over Bluetooth, not USB tools like the
+`meshtastic` CLI.
+
+## Desktop app
+
+The logger runs as a service (below), so the app is only a window onto
+it. Open it from the app menu ("MeshShack"), or run `.venv/bin/meshshack gui`.
+Starting it again while it's running just brings the window back.
+
+**Tray:** the app lives in the system tray (on Ubuntu's GNOME this needs the
+AppIndicator extension, which is on by default). Closing the window hides it
+there; left-click the icon to bring it back. The icon shows the unread count,
+a red bar when transmitting is off, and turns grey when the radio isn't
+connected. A notification pops up when a message arrives while the window
+is hidden. The tray menu has the transmit switch, and "Quit" quits the app.
+The logger keeps recording either way.
+
+**Start at login:** `meshshack gui --tray` starts in the tray without opening
+the window:
+
+```bash
+# run from the meshshack folder; fills in where it's installed
+sed "s#@MESHSHACK_DIR@#$PWD#g" desktop/meshshack.desktop > ~/.local/share/applications/meshshack.desktop
+sed "s#@MESHSHACK_DIR@#$PWD#g" desktop/meshshack-autostart.desktop > ~/.config/autostart/meshshack.desktop
+```
+
+- **Chat:** your radio's channels and direct-message conversations with
+  unread counts. Messages show SNR, RSSI and hops. Your sent messages show
+  delivery status: `…` sending, `✓` relayed by a neighbor, `✓✓` delivered
+  (direct messages only), `✗` failed. The send box counts bytes against
+  the 200-byte limit.
+- **Map:** nodes with a position on OpenStreetMap. Color is when a node was
+  last heard; shape is how its traffic reaches you (circle radio, square
+  internet/MQTT, triangle both, diamond not logged yet, star this station).
+  Most channels share positions rounded to a grid cell (LongFast's default
+  is about 5.8 × 4.4 km), so a rounded position is drawn with a dashed box
+  showing the area the node could be anywhere in, and nodes rounded to the
+  same point are fanned out around it. Your own station is drawn at the
+  exact fixed position you set, not the rounded one it broadcasts.
+  Optional position trails. Click a node to message it, traceroute it, or
+  request its position.
+- **Nodes:** sortable table: last heard, how it's heard (radio, internet,
+  or both), direct SNR/RSSI, hops, battery, and distance from you (≈ when a
+  position is rounded). SNR and RSSI only come from packets heard straight
+  from the node; a relayed packet's signal belongs to the last relay, and an
+  MQTT packet's to the gateway, so those are left blank. Actions: message,
+  traceroute, request position, telemetry or node info, and **★ Favorite**
+  or **Ignore**. Both are stored on your radio and nothing is transmitted.
+  With the CLIENT_BASE role, favorites get router priority; ignored nodes'
+  packets are dropped by the radio (so not logged either). "★ Favorites
+  first" keeps favorites at the top of any sort. Below the table:
+  - **Details:** everything known about the selected node: when it was
+    heard (at all, over the radio, directly), its direct signal, position
+    and how precise it is, packets logged by type, and its last traceroute.
+  - **Charts:** its history, one measure per chart: battery, voltage,
+    channel utilization, transmit airtime (from its device telemetry), and
+    direct SNR. Hover for the exact time and value; "Show as table" lists
+    the readings. Long ranges are averaged to keep it quick.
+  - **Activity:** traceroutes and requests with their results. The logger
+    matches replies even while the app is closed.
+  - **Export:** nodes (CSV or KML), messages, telemetry (CSV), or position
+    history (GPX), for the time range picked under "Heard". The same is
+    available as `meshshack export` (below).
+- **Channels:** your radio's channels, with encryption (default public key,
+  private AES-128/256 key, or none) and position sharing. Add a private
+  channel with a fresh random key, edit a secondary channel, delete one, or
+  **Share** it as a QR code or link that adds just that channel (with the
+  LoRa settings it needs) to another node; scan it in the Meshtastic app. The
+  primary channel's name and key are locked, since they're what put you on
+  the public mesh, but its position sharing can be changed: it sets how
+  precisely your location is shared (e.g. 13 bits is about a 5.8 × 4.4 km
+  area; 0 shares none). Keys are only shown to the app itself, never to API
+  tokens, and every change is a config write through the gatekeeper.
+- **Device:** at the bottom, **this station's history**: your radio reports
+  channel utilization, transmit airtime, battery and voltage about once a
+  minute, so you can watch how busy the mesh is around you (with the 25%
+  line where the firmware starts holding back).
+- **Device:** radio status (firmware, region, preset, battery, channel
+  utilization, channels), reboot, announce node info, and settings for owner
+  name, role and position (broadcast interval, smart broadcast, GPS mode,
+  fixed position). Each change asks for confirmation first. Region, modem
+  preset and channel editing are deliberately left out for now.
+
+Renaming the node keeps licensed (ham) mode as it was; the Meshtastic
+library's `setOwner()` would otherwise turn it off.
+
+Without the logger running, the app still shows everything logged so far;
+sending and device controls come back once `meshshack run` is up.
+
+## Airtime
+
+The mesh is shared, and anything sent can be repeated by many other nodes,
+so MeshShack is deliberately conservative. Every transmission, from the app,
+the API or (later) automations, goes through one gatekeeper in the logger
+(`meshshack/airtime.py`). That includes config changes, because they reboot
+the radio and a rebooting radio re-announces itself. The gatekeeper allows or
+refuses each send and logs the decision.
+
+- **Kill switch:** the "Transmit" button in the app's status bar, or
+  `meshshack tx off` / `meshshack tx on`. When it's off, nothing is sent,
+  including config changes. It stays off across restarts.
+  `meshshack tx` shows the switch and a log of every send decision.
+- **Cost:** a direct message or a request is 1 credit. A channel broadcast,
+  traceroute, node announcement or config change is 3, because they're
+  flooded or repeated.
+- **You, in the app:** at most 5 sends a minute. Traceroutes at least 3
+  minutes apart and at most 6 an hour. Above 25% channel utilization you
+  get a warning (the firmware itself holds back from there), but nothing is
+  refused.
+- **Other apps (API):** 6 credits an hour each. No broadcasts unless
+  allowed, no config changes, and a node traced at most once every 3 hours.
+- **Automations:** each job at most once every 6 hours, and at most 4
+  automated sends a day in total.
+- **Anything unattended:** sends at least 30 seconds apart, and paused while
+  channel utilization is over 20% or this radio's own transmit airtime is
+  over 5%. MeshShack never re-sends anything itself.
+- **Local settings** (favorite or ignore a node) aren't transmissions: they
+  change a list on your radio only, so they're logged at no cost and work
+  even with transmitting off. Only the app can make them.
+
+Where these numbers come from: the firmware holds back its own sends above
+25% channel utilization. Meshtastic's developers asked a busy app to space
+traceroutes 3 minutes apart and 3 hours per node after its automatic
+traceroutes pushed a 100-node mesh past 40% utilization
+([firmware #6173](https://github.com/meshtastic/firmware/issues/6173),
+[MeshSense #64](https://github.com/Affirmatech/MeshSense/issues/64)).
+[MeshMonitor](https://meshmonitor.org/features/automation.html) recommends
+6–12 hours for automatic announcements and 30 seconds between queued
+messages. Community guides keep the hop limit at 3
+([SoCal Mesh](https://socalmesh.org/help/best-practices/)). They also note
+that routine position, telemetry and node-info broadcasts far outweigh chat
+([NEPAMesh](https://nepamesh.com/recommended-node-settings-stop-your-node-from-being-that-node/)),
+so a fixed station's own broadcast intervals matter most of all.
+
+## API for other apps
+
+The logger serves a small HTTP API on `http://127.0.0.1:8765`, reachable
+only from this machine. The desktop app uses it with the token in
+`hub.json`, and it's the only caller that can change the radio's settings
+or flip the transmit switch. Other apps get their own tokens:
+
+```bash
+.venv/bin/meshshack token create weather-display          # read only
+.venv/bin/meshshack token create pager --send             # read + direct messages
+.venv/bin/meshshack token create bulletin --send --allow-broadcast
+.venv/bin/meshshack token                                 # list, with last use
+.venv/bin/meshshack token revoke pager
+```
+
+A token is shown once; only its hash is stored. Send it as
+`Authorization: Bearer <token>`. Every send from a token goes through the
+airtime gatekeeper with its own budget (see [Airtime](#airtime)).
+
+| Endpoint | Scope | What it does |
+|----------|-------|--------------|
+| `GET /api/status` | read | Radio, LoRa settings, channels, battery |
+| `GET /api/nodes?since=24h` | read | Nodes, with `via` (radio, mqtt, both, unknown) |
+| `GET /api/messages?since=&channel=&peer=` | read | Text messages; a channel or a DM peer gives that conversation |
+| `GET /api/packets?since=&type=&node=` | read | Raw packets, fully decoded |
+| `GET /api/telemetry?since=&kind=&node=` | read | Telemetry reports |
+| `GET /api/positions?since=&node=` | read | Position history |
+| `GET /api/requests` | read | Traceroutes and requests, with replies |
+| `GET /api/tx` | read | Transmit switch and recent send decisions |
+| `GET /api/events` | read | Live stream (server-sent events): `packet`, `message`, `connection` |
+| `POST /api/send` `{text, to \| channel}` | send | Direct message, or a channel broadcast if the token allows broadcasts |
+| `POST /api/traceroute` `{to}` | send | Traceroute (spaced 3 min apart; a node at most every 3 h) |
+| `POST /api/request` `{to, what}` | send | Ask a node for `position`, `telemetry` or `nodeinfo` |
+| `POST /api/announce` | send | Broadcast this node's info (needs broadcast permission) |
+| `POST /api/tx`, `/api/reboot`, `/api/config/*` | app only | Kill switch, reboot, owner/role/position |
+
+`since` takes a unix time or a duration like `30m`, `24h`, `7d`; `limit`
+caps rows (at most 1000). Nodes can be given as `!a1b2c3d4` or a number.
+Refused sends come back as HTTP 429 (budget, spacing, busy channel) or 403
+(not allowed, or transmitting is off), with the reason in `error`.
+
+```bash
+TOKEN=mst_...   # from `meshshack token create`
+curl -H "Authorization: Bearer $TOKEN" 'http://127.0.0.1:8765/api/nodes?since=1h'
+curl -N -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8765/api/events
+```
+
+## Run as a service
+
+```bash
+mkdir -p ~/.config/systemd/user
+sed "s#@MESHSHACK_DIR@#$PWD#g" systemd/meshshack.service > ~/.config/systemd/user/meshshack.service
+systemctl --user daemon-reload
+systemctl --user enable --now meshshack
+journalctl --user -u meshshack -f           # live log
+loginctl enable-linger $USER               # start at boot, keep running when logged out
+```
+
+The service restarts on its own if it ever exits, and reconnects whenever
+the radio is unplugged or reboots.
+
+## Database
+
+| Table | Contents |
+|-------|----------|
+| `nodes` | One row per node: names, hardware, role, last heard, last SNR/RSSI, hops away, last position, battery |
+| `packets` | Every packet received, with signal info and the full decoded packet as JSON |
+| `messages` | Text messages (channel and direct) |
+| `positions` | Position reports |
+| `telemetry` | Telemetry reports; `kind` is e.g. `deviceMetrics`, `environmentMetrics`, `localStats`; `metrics` is JSON |
+| `messages` (sent) | Your sent messages have `direction = 'out'` and a `status`: sending / relayed / delivered / failed (reason in `status_detail`) |
+| `events` | Logger start/stop, connects, disconnects, errors, commands sent from the app |
+
+Times are Unix timestamps (`logged_at` is when the logger received the packet).
+Ad-hoc queries work with `sqlite3`, e.g.:
+
+```sql
+SELECT datetime(logged_at, 'unixepoch', 'localtime'), json_extract(metrics, '$.batteryLevel')
+FROM telemetry WHERE from_num = 0xa1b2c3d4 AND kind = 'deviceMetrics';
+```
+
+## Tests
+
+```bash
+.venv/bin/pytest
+```
+
+The tests build real Meshtastic protobuf packets and pass them through the
+library's own decoding code, drive the API against a fake radio, and open the
+desktop app offscreen, so no radio or display is needed.
+
+## Ideas
+
+- Export to InfluxDB/Grafana (shared data store in the project README)
+- Coverage analysis: SNR/RSSI vs. distance, using node positions
+- Device controls stage 2: region, modem preset, channels
+- Replies and emoji reactions from the chat view

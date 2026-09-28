@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "meshshack"
+version = "0.1.0"
+description = "MeshShack: a desktop station for Meshtastic: logging, monitoring, messaging, and radio control"
+requires-python = ">=3.10"
+dependencies = ["meshtastic>=2.7"]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+gui = ["PySide6>=6.6", "segno>=1.5"]
+
+[project.scripts]
+meshshack = "meshshack.cli:main"
+
+[tool.setuptools]
+packages = ["meshshack", "meshshack.gui"]
+
+[tool.setuptools.package-data]
+"meshshack.gui" = ["assets/*"]

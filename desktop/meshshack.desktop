@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=MeshShack
+Comment=Meshtastic station: chat, map, nodes, and radio control
+Exec=@MESHSHACK_DIR@/.venv/bin/meshshack gui
+Icon=@MESHSHACK_DIR@/meshshack/gui/assets/icon.svg
+Terminal=false
+Categories=Network;HamRadio;
+StartupWMClass=meshshack
