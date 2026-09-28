@@ -11,6 +11,7 @@ from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import QCheckBox, QComboBox, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
 from .. import __version__
+from ..coverage import report as coverage_report
 from ..store import path_kind
 from .common import WINDOWS, cell_size_text, distance_km, effective_precision, fmt_ago, precision_cell, since_for, station_position
 
@@ -52,6 +53,11 @@ class MapTab(QWidget):
         self.areas.setToolTip("Many nodes share only a rounded position. Show the box each one could be anywhere in.")
         self.areas.setChecked(win.settings.value("map/areas", "true") == "true")
         self.areas.toggled.connect(self._areas_changed)
+        self.links = QCheckBox("Direct links")
+        self.links.setToolTip("Lines from this station to every node heard directly (0 hops) in the chosen time "
+                              "range. Dashed when the node's position is rounded.")
+        self.links.setChecked(win.settings.value("map/links", "false") == "true")
+        self.links.toggled.connect(self._links_changed)
         fit = QPushButton("Fit all nodes")
         fit.clicked.connect(lambda: self.view.page().runJavaScript("meshshack.fit()"))
         self.count = QLabel()
@@ -61,6 +67,7 @@ class MapTab(QWidget):
         controls.addWidget(self.window_box)
         controls.addWidget(self.trails)
         controls.addWidget(self.areas)
+        controls.addWidget(self.links)
         controls.addWidget(fit)
         controls.addStretch(1)
         controls.addWidget(self.count)
@@ -87,6 +94,10 @@ class MapTab(QWidget):
 
     def _trails_changed(self, on):
         self.win.settings.setValue("map/trails", "true" if on else "false")
+        self._data_changed()
+
+    def _links_changed(self, on):
+        self.win.settings.setValue("map/links", "true" if on else "false")
         self._data_changed()
 
     def _areas_changed(self, on):
@@ -153,7 +164,16 @@ class MapTab(QWidget):
                 if p["from_num"] in shown:
                     points[p["from_num"]].append([p["latitude"], p["longitude"]])
             tracks = [{"num": num, "points": pts} for num, pts in points.items()]
-        return {"nodes": nodes, "tracks": tracks, "show_areas": self.areas.isChecked()}
+        links = []
+        if self.links.isChecked() and my_lat is not None:
+            preset = (self.win.status.get("lora") or {}).get("modem_preset")
+            rep = coverage_report(self.store, (my_lat, my_lon, my_bits), preset, since=since or 0)
+            links = [{"num": n["num"], "name": n["short_name"] or n["id"], "lat": n["latitude"], "lon": n["longitude"],
+                      "snr": n["snr_median"], "margin": n["margin_db"], "packets": n["packets"],
+                      "rounded": n["rounded"], "distance": n["distance_km"]}
+                     for n in rep["neighbors"] if n["latitude"] is not None]
+        return {"nodes": nodes, "tracks": tracks, "show_areas": self.areas.isChecked(),
+                "station": [my_lat, my_lon] if my_lat is not None else None, "links": links}
 
     def _on_action(self, msg):
         action, num = msg.get("action"), msg.get("num")

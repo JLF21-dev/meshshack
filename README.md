@@ -22,6 +22,9 @@ a kill switch.
   busy, and a kill switch; see [Airtime](#airtime).
 - **API for other apps:** read endpoints, a live event stream, and scoped,
   revocable tokens; see [API for other apps](#api-for-other-apps).
+- **Coverage analysis:** who you hear directly (distance, bearing, SNR, link
+  margin), and which relays bring you everything else, from what's already
+  logged. Useful for siting a node.
 - **Export:** nodes (CSV/KML), messages and telemetry (CSV), position history (GPX).
 
 Status: 0.1, in daily use on a Heltec V4 (firmware 2.7) on Linux. Plans and the
@@ -30,8 +33,8 @@ backlog are in [ROADMAP.md](ROADMAP.md).
 | Nodes, with a node's history | This station's channel load |
 |---|---|
 | ![Nodes tab with charts](docs/screenshots/nodes.png) | ![Device tab with station history](docs/screenshots/device.png) |
-| **Chat** | **Channels** |
-| ![Chat](docs/screenshots/chat.png) | ![Channels](docs/screenshots/channels.png) |
+| **Chat** | **Coverage** |
+| ![Chat](docs/screenshots/chat.png) | ![Coverage](docs/screenshots/coverage.png) |
 
 The screenshots come from `dev/demo_gui.py`, which fills a demo database with
 made-up nodes.
@@ -83,6 +86,7 @@ appears, try another USB cable, since many are power-only.
 .venv/bin/meshshack telemetry --kind deviceMetrics
 .venv/bin/meshshack stats --since 7d        # packet counts by type
 .venv/bin/meshshack events                  # connect/disconnect history
+.venv/bin/meshshack coverage --since 7d  # direct neighbors and where traffic comes from
 .venv/bin/meshshack export nodes -f kml -o nodes.kml          # also csv
 .venv/bin/meshshack export positions --since 7d -o tracks.gpx
 .venv/bin/meshshack export messages -o messages.csv           # telemetry too
@@ -164,6 +168,22 @@ sed "s#@MESHSHACK_DIR@#$PWD#g" desktop/meshshack-autostart.desktop > ~/.config/a
   - **Export:** nodes (CSV or KML), messages, telemetry (CSV), or position
     history (GPX), for the time range picked under "Heard". The same is
     available as `meshshack export` (below).
+- **Coverage:** how this station hears the mesh, from the log alone (nothing
+  is transmitted):
+  - **Heard directly:** every node heard straight from the source (0 hops,
+    not MQTT), with distance and compass bearing from you (a range when its
+    position is rounded), packets, median/best/worst SNR, and **link
+    margin**: the median SNR above the lowest SNR your modem preset can
+    decode (about −17.5 dB for LongFast). A few dB is a fragile link.
+  - **Traffic sources:** what share of everything you hear arrived directly,
+    through each relaying neighbor, via MQTT, or by an unknown path. The
+    firmware records only the last byte of a relay's ID, so relays are
+    matched to nodes you hear directly by that byte ("?" marks a guess).
+  - **SNR against distance** for direct neighbors: the median SNR, a bar for
+    the best-to-worst spread, a dashed bar for the distance range of a
+    rounded position, and a line at the decoding limit.
+  - On the **Map**, "Direct links" draws a line to each direct neighbor.
+  The same report is `meshshack coverage` and `GET /api/coverage`.
 - **Channels:** your radio's channels, with encryption (default public key,
   private AES-128/256 key, or none) and position sharing. Add a private
   channel with a fresh random key, edit a secondary channel, delete one, or
@@ -263,6 +283,7 @@ airtime gatekeeper with its own budget (see [Airtime](#airtime)).
 | `GET /api/telemetry?since=&kind=&node=` | read | Telemetry reports |
 | `GET /api/positions?since=&node=` | read | Position history |
 | `GET /api/requests` | read | Traceroutes and requests, with replies |
+| `GET /api/coverage?since=` | read | Direct neighbors (distance, bearing, SNR, margin) and traffic sources |
 | `GET /api/tx` | read | Transmit switch and recent send decisions |
 | `GET /api/events` | read | Live stream (server-sent events): `packet`, `message`, `connection` |
 | `POST /api/send` `{text, to \| channel}` | send | Direct message, or a channel broadcast if the token allows broadcasts |

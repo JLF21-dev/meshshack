@@ -168,7 +168,7 @@ CREATE INDEX IF NOT EXISTS messages_logged_at ON messages (logged_at);
 CREATE INDEX IF NOT EXISTS messages_packet_id ON messages (packet_id);
 """
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 REQUEST_TIMEOUT = 180
 
 
@@ -213,8 +213,18 @@ def _token_hash(token):
     return hashlib.sha256(token.encode()).hexdigest()
 
 
+def hop_limit(packet):
+    """The packet's remaining hop limit. Protobuf-to-dict conversion drops zero fields, so a packet
+    that used up all its hops has no hopLimit; with a hopStart present, that means 0. Without a
+    hopStart (older firmware) it's genuinely unknown."""
+    limit = packet.get("hopLimit")
+    if limit is None and packet.get("hopStart") is not None:
+        return 0
+    return limit
+
+
 def hops_taken(packet):
-    start, limit = packet.get("hopStart"), packet.get("hopLimit")
+    start, limit = packet.get("hopStart"), hop_limit(packet)
     if start is None or limit is None:
         return None
     return start - limit
@@ -257,6 +267,12 @@ class Store:
             with self._conn:
                 self._add_column("nodes", "is_favorite", "INTEGER NOT NULL DEFAULT 0")
                 self._add_column("nodes", "is_ignored", "INTEGER NOT NULL DEFAULT 0")
+        if version < 5:
+            # A packet that used up all its hops was stored with no hop limit (see hop_limit());
+            # fill in the 0 and recompute the hop counts that depend on it.
+            with self._conn:
+                self._conn.execute("UPDATE packets SET hop_limit = 0 WHERE hop_start IS NOT NULL AND hop_limit IS NULL")
+            self._migrate_v2()
         self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     def _add_column(self, table, column, decl):
@@ -366,7 +382,7 @@ class Store:
                     packet.get("rxTime"),
                     packet.get("rxSnr"),
                     packet.get("rxRssi"),
-                    packet.get("hopLimit"),
+                    hop_limit(packet),
                     packet.get("hopStart"),
                     int(bool(packet.get("viaMqtt"))),
                     int(bool(local)),
@@ -787,6 +803,47 @@ class Store:
         )
         series["directSnr"] = [(r["logged_at"], r["rx_snr"]) for r in snr]
         return series
+
+    def coverage(self, since=0):
+        """How this station hears the mesh, for the Coverage tab. Returns
+          direct: {num: {"snrs": [...], "rssis": [...], "last": t}} for packets heard straight from
+                  the node (see DIRECT_SQL);
+          relays: {last byte of the relaying node's id: packet count} for over-the-air packets that
+                  took at least one hop (the firmware only records the relayer's last byte);
+          totals: {"heard", "direct", "relayed", "mqtt", "unknown_path"} packet counts (not local)."""
+        direct = {}
+        for r in self._query(
+            f"SELECT from_num, rx_snr, rx_rssi, logged_at FROM packets p "
+            f"WHERE logged_at >= ? AND is_local = 0 AND {DIRECT_SQL} ORDER BY logged_at",
+            (since,),
+        ):
+            d = direct.setdefault(r["from_num"], {"snrs": [], "rssis": [], "last": 0})
+            d["snrs"].append(r["rx_snr"])
+            if r["rx_rssi"] is not None:
+                d["rssis"].append(r["rx_rssi"])
+            d["last"] = r["logged_at"]
+        relays = {
+            r["relay"]: r["c"]
+            for r in self._query(
+                """SELECT json_extract(json, '$.relayNode') AS relay, COUNT(*) AS c FROM packets
+                   WHERE logged_at >= ? AND is_local = 0 AND COALESCE(via_mqtt, 0) = 0
+                     AND hop_start IS NOT NULL AND hop_start > hop_limit
+                     AND json_extract(json, '$.relayNode') IS NOT NULL
+                   GROUP BY relay""",
+                (since,),
+            )
+        }
+        t = self._query(
+            """SELECT COUNT(*) AS heard,
+                      SUM(COALESCE(via_mqtt, 0) != 0) AS mqtt,
+                      SUM(COALESCE(via_mqtt, 0) = 0 AND hop_start IS NOT NULL AND hop_start > hop_limit) AS relayed,
+                      SUM(COALESCE(via_mqtt, 0) = 0 AND hop_start IS NULL) AS unknown_path
+               FROM packets WHERE logged_at >= ? AND is_local = 0""",
+            (since,),
+        )[0]
+        totals = {k: t[k] or 0 for k in ("heard", "mqtt", "relayed", "unknown_path")}
+        totals["direct"] = sum(len(d["snrs"]) for d in direct.values())
+        return {"direct": direct, "relays": relays, "totals": totals}
 
     def node_summary(self, num):
         """Packet counts by type, message count, and the latest traceroute for the detail panel."""

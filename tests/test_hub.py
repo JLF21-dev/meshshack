@@ -428,3 +428,12 @@ def test_replies_and_reactions(api, store):
     assert call("POST", "/api/send", {"text": "ok", "to": BOB, "reply_id": 4242, "emoji": True})[0] == 400
     assert call("POST", "/api/send", {"text": "hi", "to": BOB, "reply_id": "abc"})[0] == 400
     assert store.tx_log()[0]["kind"] == "dm"  # reactions go through the gatekeeper like any message
+
+
+def test_coverage_endpoint(api, store):
+    call, iface, _ = api
+    store.record_packet({"from": BOB, "to": BROADCAST_NUM, "id": 1, "rxSnr": -6.0, "hopStart": 3, "hopLimit": 3,
+                         "decoded": {"portnum": "POSITION_APP"}})
+    token = store.create_token("mapper", {"read"})
+    status, body = call("GET", "/api/coverage?since=1h", token=token)
+    assert status == 200 and body["neighbors"][0]["num"] == BOB and body["totals"]["direct"] == 1

@@ -651,6 +651,16 @@ def _routes(radio):
             rows = store.messages(limit=q.limit(), since=q.since())
         return {"messages": _rows(rows)}
 
+    def coverage(c, b, q):
+        from .coverage import report, station_from_store
+
+        status = radio.status()
+        pos = status.get("position") or {}
+        station = station_from_store(store)
+        if station[0] is None and pos.get("latitude") is not None:
+            station = (pos["latitude"], pos["longitude"], None)
+        return report(store, station, (status.get("lora") or {}).get("modem_preset"), since=q.since() or 0)
+
     def send(c, b, q):
         args = body_args(b, "text", optional=("channel", "to", "reply_id", "emoji"))
         return radio.send_text(**args, source=c.source, allow_broadcast=c.allow_broadcast)
@@ -666,6 +676,7 @@ def _routes(radio):
             store.telemetry(limit=q.limit(), kind=q.str("kind"), since=q.since(), from_num=q.node()), parse=("metrics",))}),
         ("GET", "/api/positions"): ("read", lambda c, b, q: {"positions": _rows(
             store.positions(limit=q.limit(500), since=q.since(), from_num=q.node()))}),
+        ("GET", "/api/coverage"): ("read", coverage),
         ("GET", "/api/requests"): ("read", lambda c, b, q: {"requests": _rows(
             store.requests(limit=q.limit()), parse=("response_json",))}),
         ("GET", "/api/tx"): ("read", lambda c, b, q: radio.tx_status(limit=q.limit(20))),

@@ -241,6 +241,38 @@ def cmd_export(args, store):
         print(f"Wrote {count} {args.what if count != 1 else args.what.rstrip('s')} to {args.out}", file=sys.stderr)
 
 
+def cmd_coverage(args, store):
+    from .coverage import report, station_from_store
+
+    preset = None
+    try:  # the modem preset (for link margins) comes from the running logger, if there is one
+        import urllib.request
+        info = json.loads((args.db.parent / "hub.json").read_text())
+        req = urllib.request.Request(info["url"] + "/api/status", headers={"Authorization": f"Bearer {info['token']}"})
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            preset = (json.loads(resp.read()).get("lora") or {}).get("modem_preset")
+    except Exception:
+        pass
+    rep = report(store, station_from_store(store), preset, since=args.since or 0)
+    t = rep["totals"]
+    print(f"Heard {t['heard']} packets; {len(rep['neighbors'])} nodes heard directly "
+          f"({t['direct'] / (t['heard'] or 1):.0%} of packets)."
+          + ("" if preset else " (Link margins need the logger running.)"))
+    print()
+    print_table(
+        ["node", "distance", "bearing", "packets", "median snr", "best", "worst", "margin", "last direct"],
+        [[n["short_name"] or n["id"],
+          (f"{n['distance_range_km'][0]:.1f}-{n['distance_range_km'][1]:.1f} km" if n["rounded"]
+           else f"{n['distance_km']:.1f} km") if n["distance_range_km"] else "",
+          n["bearing"], n["packets"], n["snr_median"], n["snr_best"], n["snr_worst"],
+          f"{n['margin_db']:+.1f} dB" if n["margin_db"] is not None else "", fmt_ago(n["last_direct"])]
+         for n in rep["neighbors"]],
+    )
+    print()
+    print_table(["where traffic comes from", "packets", "share"],
+                [[s["label"], s["packets"], f"{s['share']:.1%}"] for s in rep["sources"]])
+
+
 def build_parser():
     parser = argparse.ArgumentParser(prog="meshshack", description="MeshShack: log, monitor, and control a Meshtastic radio.")
     parser.add_argument("--db", type=Path, default=DEFAULT_DB, help=f"database path (default: {DEFAULT_DB})")
@@ -306,6 +338,11 @@ def build_parser():
     p.add_argument("-o", "--out", help="file to write (default: standard output)")
     p.add_argument("--since", type=parse_since, help=since_help)
     p.set_defaults(func=cmd_export)
+
+    p = sub.add_parser("coverage", help="who you hear directly (distance, bearing, SNR, margin) and "
+                                        "which relays bring you the rest")
+    p.add_argument("--since", type=parse_since, help=since_help)
+    p.set_defaults(func=cmd_coverage)
 
     p = sub.add_parser("stats", help="packet counts by type")
     p.add_argument("--since", type=parse_since, help=since_help)

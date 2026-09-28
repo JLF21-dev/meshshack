@@ -78,6 +78,21 @@ for h in range(24):
                                         "channelUtilization": round(5 + random.uniform(-1, 2), 2), "airUtilTx": round(0.8 + random.uniform(0, 0.4), 2)}}}},
         now=t)
 store.set_node_flags(0x11111111, favorite=True)
+# Traffic from farther away, as the Coverage tab sees it: mostly relayed by the campus router
+# (ID ends 0x11), some by the solar relay (0x22), a little via MQTT; plus direct packets from SOL.
+for i in range(52):
+    relay = 0x11 if i < 40 else 0x22
+    store.record_packet({"from": 0x70000000 + i % 9, "to": BROADCAST_NUM, "id": 40000 + i, "rxSnr": round(random.uniform(-12, 4), 2),
+                         "rxRssi": random.randint(-118, -90), "hopStart": 3, "hopLimit": random.choice([0, 1, 2]),
+                         "relayNode": relay, "decoded": {"portnum": "POSITION_APP"}}, now=now - random.uniform(0, 86000))
+for i in range(5):
+    store.record_packet({"from": 0x7A000000 + i, "to": BROADCAST_NUM, "id": 41000 + i, "rxSnr": 5.0, "hopStart": 7,
+                         "hopLimit": 4, "viaMqtt": True, "relayNode": 0x11, "decoded": {"portnum": "NODEINFO_APP"}},
+                        now=now - random.uniform(0, 86000))
+for i in range(8):
+    store.record_packet({"from": 0x22222222, "to": BROADCAST_NUM, "id": 42000 + i, "rxSnr": round(random.uniform(-14, -8), 2),
+                         "rxRssi": -110, "hopStart": 3, "hopLimit": 3, "decoded": {"portnum": "POSITION_APP"}},
+                        now=now - random.uniform(0, 86000))
 
 iface = FakeInterface()
 iface.localNode.localConfig.device.role = 12  # CLIENT_BASE
@@ -97,7 +112,7 @@ steps = []
 def shot(name):
     win.grab().save(str(out / f"gui_{name}.png")); print("saved", name)
 def seq(i=0):
-    plan = [(0, "chat"), (1, "map"), (2, "nodes"), (3, "channels"), (4, "device")]
+    plan = [(0, "chat"), (1, "map"), (2, "nodes"), (3, "coverage"), (4, "channels"), (5, "device")]
     if i < len(plan):
         idx, name = plan[i]
         win.tabs.setCurrentIndex(idx)

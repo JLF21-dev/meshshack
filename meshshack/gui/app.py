@@ -15,6 +15,7 @@ from ..airtime import Gatekeeper
 from ..store import Store
 from .activity import KIND_LABELS, ActivityTracker
 from .channels import ChannelsTab
+from .coverage import CoverageTab
 from .chat import ChatTab
 from .device import DeviceTab
 from .hub_client import HubClient
@@ -47,11 +48,13 @@ class MainWindow(QMainWindow):
         self.chat = ChatTab(self)
         self.map = MapTab(self)
         self.nodes = NodesTab(self)
+        self.coverage = CoverageTab(self)
         self.channels = ChannelsTab(self)
         self.device = DeviceTab(self)
         self.tabs.addTab(self.chat, "Chat")
         self.tabs.addTab(self.map, "Map")
         self.tabs.addTab(self.nodes, "Nodes")
+        self.tabs.addTab(self.coverage, "Coverage")
         self.tabs.addTab(self.channels, "Channels")
         self.tabs.addTab(self.device, "Device")
         self.setCentralWidget(self.tabs)

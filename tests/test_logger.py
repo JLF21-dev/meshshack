@@ -331,3 +331,33 @@ def test_exports(store):
         xml.dom.minidom.parseString(out[key])  # well-formed despite & and < in names
     assert "<name>B&amp;B</name>" in out[("positions", "gpx")]
     assert 'lat="40.1165"' in out[("positions", "gpx")]
+
+
+def test_packet_that_used_all_its_hops(store):
+    # hopLimit 0 is dropped when the protobuf becomes a dict; with a hopStart, it means 0 left.
+    store.record_packet({"from": BOB, "to": BROADCAST_NUM, "id": 1, "rxSnr": -9.0, "hopStart": 7,
+                         "decoded": {"portnum": "POSITION_APP"}})
+    [p] = store.packets()
+    assert (p["hop_start"], p["hop_limit"]) == (7, 0)
+    assert store.node(BOB)["hops_away"] == 7
+    store.record_packet({"from": ALICE, "to": BROADCAST_NUM, "id": 2, "rxSnr": -9.0,  # old firmware: unknown
+                         "decoded": {"portnum": "POSITION_APP"}})
+    assert store.node(ALICE)["hops_away"] is None
+
+
+def test_migration_v5_fills_missing_hop_limits(tmp_path):
+    import sqlite3
+    path = tmp_path / "v4.db"
+    Store(path).close()
+    conn = sqlite3.connect(path)
+    conn.executescript(f"""
+        INSERT INTO nodes (num, node_id, first_seen, updated_at) VALUES ({BOB}, '!0badbeef', 0, 0);
+        INSERT INTO packets (logged_at, from_num, rx_snr, hop_start, hop_limit, via_mqtt, json)
+            VALUES (1, {BOB}, -9.0, 5, NULL, 0, '{{}}');
+        PRAGMA user_version = 4;
+    """)
+    conn.commit()
+    conn.close()
+    store = Store(path)
+    assert store.packets()[0]["hop_limit"] == 0 and store.node(BOB)["hops_away"] == 5
+    store.close()

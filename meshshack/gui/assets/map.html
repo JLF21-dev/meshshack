@@ -32,6 +32,7 @@ L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
 const markers = new Map();  // node num -> marker
 const trails = L.layerGroup().addTo(map);
 const areas = L.layerGroup().addTo(map);  // precision cells of rounded positions
+const links = L.layerGroup().addTo(map);  // direct links from this station
 let fitted = false;
 
 const legend = L.control({ position: 'bottomleft' });
@@ -48,6 +49,8 @@ legend.onAdd = () => {
     row('square', '#fff', 'Internet (MQTT)') +
     row('triangle', '#fff', 'Both radio and internet') +
     row('diamond', '#fff', 'Not logged yet (radio\'s saved list)') +
+    '<svg width="12" height="12" viewBox="0 0 12 12"><line x1="0" y1="6" x2="12" y2="6" stroke="#2a78d6" stroke-width="2"/></svg>' +
+    'Direct link (when shown)<br>' +
     '<b>Position</b>' +
     '<svg width="12" height="12" viewBox="0 0 12 12"><rect x="1" y="1" width="10" height="10" fill="rgba(0,0,0,0.06)" ' +
     'stroke="#555" stroke-dasharray="2 2"/></svg>Rounded: node is somewhere in the box';
@@ -174,6 +177,16 @@ window.meshshack = {
     const seen = new Set();
     const offsets = fanOffsets(data.nodes);
     areas.clearLayers();
+    links.clearLayers();
+    if (data.station) {
+      for (const l of data.links) {
+        const margin = l.margin != null ? `, ${l.margin >= 0 ? '+' : ''}${l.margin.toFixed(1)} dB margin` : '';
+        L.polyline([data.station, [l.lat, l.lon]], {
+          color: '#2a78d6', weight: 2.5, opacity: 0.8, dashArray: l.rounded ? '6 5' : null,
+        }).bindTooltip(`${esc(l.name)}: heard directly, median SNR ${l.snr.toFixed(1)} dB${margin}, ` +
+                       `${l.packets} packets${l.rounded ? ' (position rounded)' : ''}`, { sticky: true }).addTo(links);
+      }
+    }
     const drawnCells = new Set();  // nodes sharing a cell share one box, colored by the freshest (listed first)
     for (const n of data.nodes) {
       seen.add(n.num);
