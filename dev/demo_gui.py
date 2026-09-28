@@ -39,7 +39,16 @@ store.record_outgoing_message(9001, ME, BROADCAST_NUM, 0, "N0CALL base station o
 store._conn.execute("UPDATE messages SET status='relayed' WHERE packet_id=9001"); store._conn.commit()
 rx(0x22222222, "Welcome! Your base is 2.5 dB SNR here at the relay.", 2500, snr=2.5, rssi=-104)
 rx(0x44444444, "Heard you from the west side too, 2 hops.", 2000, snr=-9.0, rssi=-121, hs=3, hl=1)
+store.record_packet({"from": 0x22222222, "to": BROADCAST_NUM, "id": 9101, "channel": 0, "rxSnr": 2.5, "rxRssi": -104,
+                     "hopStart": 3, "hopLimit": 3, "decoded": {"portnum": "TEXT_MESSAGE_APP", "text": "👋", "replyId": 9001, "emoji": 1}},
+                    now=now - 2900)
+store.record_packet({"from": 0x11111111, "to": BROADCAST_NUM, "id": 9102, "channel": 0, "rxSnr": 7.25, "rxRssi": -88,
+                     "hopStart": 3, "hopLimit": 3, "decoded": {"portnum": "TEXT_MESSAGE_APP", "text": "👍", "replyId": 9001, "emoji": 1}},
+                    now=now - 2800)
 store.record_outgoing_message(9002, ME, BROADCAST_NUM, 0, "Thanks all, logging everything to SQLite now.", now=now - 60)
+store.record_packet({"from": 0x11111111, "to": BROADCAST_NUM, "id": 9103, "channel": 0, "rxSnr": 7.0, "rxRssi": -88,
+                     "hopStart": 3, "hopLimit": 3, "decoded": {"portnum": "TEXT_MESSAGE_APP",
+                     "text": "Nice! Does it keep the encrypted packets too?", "replyId": 9002}}, now=now - 30)
 rx(0x33333333, "Are you coming to the mesh meetup Saturday?", 600, to=ME, snr=-4.5, rssi=-114)
 store.record_outgoing_message(9003, ME, 0x33333333, 0, "Planning on it, I'll bring the Heltec.", now=now - 500)
 store._conn.execute("UPDATE messages SET status='delivered' WHERE packet_id=9003"); store._conn.commit()

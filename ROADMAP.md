@@ -22,7 +22,9 @@ transmission goes through one airtime gatekeeper, with a kill switch.
      repeater node is built (then build and test against it)
 5. [ ] Automation: scheduled/triggered informational messages (weekly time,
    daily weather), plus emergency detection with loud local alerts; each job
-   opt-in, previewed as a dry run first, with a hard minimum interval
+   opt-in, previewed as a dry run first, with a hard minimum interval.
+   Messages are user-defined; their content can come from data sources and
+   APIs (see "Automation design" below)
 
 Paused until a solar repeater node is available to build and test remote admin against.
 
@@ -55,6 +57,36 @@ Picked up when work resumes. The ground rule above applies to every item.
   with a loud local alert and tray notification (no airtime). Anything that
   would transmit in response needs a human to confirm it.
 
+**Automation design (roadmap step 5)**
+
+The goal: define your own automated messages in the app, with content filled
+in at send time from data sources, including external APIs. Proposed shape:
+
+- [ ] **Jobs** you create in an Automation tab: a name; a trigger; a
+  destination (a channel or a direct message); a message template; and on/off.
+  Each new job starts in dry-run mode.
+- [ ] **Triggers:** a schedule (e.g. weekly on a day and time, daily at a
+  time, or every N hours, never under 6 h) or an event (e.g. an emergency
+  keyword, a favorite node going quiet or coming back, the channel staying
+  busy). Scheduled sends get a few minutes of random jitter.
+- [ ] **Templates** with placeholders, e.g. `{time}`, `{date}`,
+  `{station.channel_util}`, `{node:CMP.battery}`, `{weather.temp}`. There's a
+  live preview that renders the real text and its byte count against the
+  200-byte limit; a message that renders too long is refused, not truncated.
+- [ ] **Data sources** that fill placeholders:
+  - built-in: local time and a NIST/NTP clock-offset check, this station's
+    telemetry, mesh stats from the log (nodes heard, busiest hour, …);
+  - HTTP/JSON APIs: a URL, fields picked by path (e.g. the National Weather
+    Service API for a forecast), a timeout, and a cache so a schedule
+    doesn't hammer the API; failures skip the send and log why;
+  - a local command's output (opt-in, for your own scripts and sensors);
+  - other apps can already send through the API with a `--send` token, and
+    get the same gatekeeper limits.
+- [ ] **Safety:** every automated send goes through the gatekeeper's
+  automation limits (each job at most every 6 h, 4 automated sends a day in
+  total, paused above 20% channel utilization, 30 s apart); no auto-replies
+  to incoming messages; a per-job log of what was sent or skipped, and why.
+
 **Deferred from the API (roadmap step 3)**
 - [ ] Optional output to a local MQTT broker (Home Assistant and similar),
   kept separate from the mesh; it never feeds back into it.
@@ -67,7 +99,7 @@ Picked up when work resumes. The ground rule above applies to every item.
 - [ ] Coverage analysis: SNR/RSSI against distance, from node positions.
 - [ ] Export to InfluxDB/Grafana.
 - [ ] Device settings, stage 2: region and modem preset (with strong warnings).
-- [ ] Replies and emoji reactions from the chat view.
+- [x] Replies and emoji reactions from the chat view.
 
 **Smaller items noted along the way**
 - [ ] Database retention/pruning. It grows about 3 MB a day, which is fine

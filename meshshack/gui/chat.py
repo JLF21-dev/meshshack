@@ -4,14 +4,17 @@ import time
 from html import escape
 
 from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QPalette
+from PySide6.QtGui import QCursor, QKeySequence, QPalette, QShortcut
 from PySide6.QtWidgets import (
-    QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QPushButton, QSplitter,
-    QTextBrowser, QVBoxLayout, QWidget,
+    QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMenu, QPushButton, QSplitter,
+    QTextBrowser, QToolButton, QVBoxLayout, QWidget,
 )
 
 from ..api import MAX_TEXT_BYTES
 from .common import fmt_ago, fmt_clock, fmt_day, node_name
+
+# Offered by React; any single emoji can also arrive from other apps.
+REACTIONS = ["👍", "❤️", "😂", "😮", "😢", "🙏", "✅", "👎"]
 
 STATUS_MARKS = {
     "sending": ("…", "sending"),
@@ -40,6 +43,7 @@ class ChatTab(QWidget):
         self._scroll_deadline = 0.0
         self._scroll_when_shown = False
         self._sending = False
+        self._reply_to = None  # packet id of the message being replied to
 
         self.conv_list = QListWidget()
         self.conv_list.setMinimumWidth(180)
@@ -53,6 +57,21 @@ class ChatTab(QWidget):
         # QTextBrowser lays text out after setHtml returns, so the scroll range grows afterwards;
         # keep applying the target while it does (see _scroll_to).
         self.view.verticalScrollBar().rangeChanged.connect(lambda *_: self._apply_scroll())
+        self.view.anchorClicked.connect(self._link_clicked)
+
+        # "Replying to …" bar above the send box, while a reply is being written.
+        self.reply_label = QLabel()
+        self.reply_label.setStyleSheet("color: gray")
+        cancel_reply = QToolButton()
+        cancel_reply.setText("✕")
+        cancel_reply.setToolTip("Cancel the reply (Esc)")
+        cancel_reply.clicked.connect(self._clear_reply)
+        self.reply_bar = QWidget()
+        reply_layout = QHBoxLayout(self.reply_bar)
+        reply_layout.setContentsMargins(0, 0, 0, 0)
+        reply_layout.addWidget(self.reply_label, 1)
+        reply_layout.addWidget(cancel_reply)
+        self.reply_bar.hide()
 
         self.input = QLineEdit()
         self.input.setPlaceholderText("Type a message…")
@@ -72,7 +91,9 @@ class ChatTab(QWidget):
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.addWidget(self.header)
         right_layout.addWidget(self.view, 1)
+        right_layout.addWidget(self.reply_bar)
         right_layout.addLayout(send_row)
+        QShortcut(QKeySequence(Qt.Key_Escape), self.input, activated=self._clear_reply)
 
         splitter = QSplitter()
         splitter.addWidget(self.conv_list)
@@ -174,6 +195,7 @@ class ChatTab(QWidget):
         if switched:
             # Remember how far you'd read before this view marks the conversation read.
             self._opened_marker = self._read_marker(self.current)
+            self._clear_reply()
         rows = self.store.thread(channel=key) if kind == "channel" else self.store.thread(peer=key)
         if rows and self._is_being_read():
             self.win.settings.setValue(f"read/{conv_key(kind, key)}", rows[-1]["id"])
@@ -243,13 +265,29 @@ class ChatTab(QWidget):
         """unread_after: read marker at opening; a "New messages" line goes above the first unread."""
         dark = self.palette().color(QPalette.Window).lightness() < 128
         new_color = "#f28b82" if dark else "#c5221f"
-        divider_done = unread_after is None or not any(
-            m["id"] > unread_after and m["direction"] == "in" for m in rows)
+        # Only between read and unread: with nothing read yet, a line above everything is noise.
+        divider_done = (unread_after is None or not any(m["id"] <= unread_after for m in rows)
+                        or not any(m["id"] > unread_after and m["direction"] == "in" for m in rows))
         in_bg, out_bg = ("#2d3138", "#1d4a80") if dark else ("#eceff3", "#d4e6ff")
         meta_color = "#9aa0a6" if dark else "#5f6368"
         if not rows:
             return f"<p style='color:{meta_color}' align='center'><br>No messages yet.</p>"
 
+        # Reactions attach to the message they react to (by packet id); replies quote it.
+        by_packet = {m["packet_id"]: m for m in rows if m["packet_id"] is not None}
+        reactions = {}
+        for m in rows:
+            if m["emoji"] and m["reply_id"] in by_packet:
+                reactions.setdefault(m["reply_id"], []).append(m)
+
+        def who(m):
+            return "You" if m["direction"] == "out" else (m["from_short"] or m["from_id"] or "?")
+
+        def snippet(m, limit=60):
+            text = " ".join((m["text"] or "").split())
+            return text if len(text) <= limit else text[: limit - 1] + "…"
+
+        link = f"style='color:{meta_color}; text-decoration:none'"
         parts = []
         last_day = None
         for m in rows:
@@ -258,6 +296,8 @@ class ChatTab(QWidget):
                              f"─────  New messages  ─────</p>")
                 divider_done = True
             parts.append(f"<a name='m{m['id']}'></a>")
+            if m["emoji"] and m["reply_id"] in by_packet:
+                continue  # shown under the message it reacts to
             day = time.strftime("%Y-%m-%d", time.localtime(m["logged_at"]))
             if day != last_day:
                 parts.append(f"<p align='center' style='color:{meta_color}'>{escape(fmt_day(m['logged_at']))}</p>")
@@ -265,9 +305,9 @@ class ChatTab(QWidget):
             outgoing = m["direction"] == "out"
             text = escape(m["text"] or "").replace("\n", "<br>")
 
-            if m["emoji"] and m["reply_id"]:  # a tapback reaction
-                who = "You" if outgoing else escape(m["from_short"] or m["from_id"])
-                parts.append(f"<p align='center' style='color:{meta_color}'>{who} reacted {text}</p>")
+            if m["emoji"] and m["reply_id"]:  # a reaction to a message that isn't in this view
+                parts.append(f"<p align='center' style='color:{meta_color}'>{escape(who(m))} reacted {text}"
+                             f" to an earlier message</p>")
                 continue
 
             meta = [fmt_clock(m["logged_at"])]
@@ -292,15 +332,32 @@ class ChatTab(QWidget):
                         meta.append("last relay " + ", ".join(signal))
                 else:
                     meta.extend(signal)
-            meta_html = f"<span style='color:{meta_color}; font-size:small'>{escape(' · '.join(meta))}</span>"
+            meta_html = f"<span style='color:{meta_color}; font-size:small'>{escape(' · '.join(meta))}"
+            if m["packet_id"] is not None:
+                meta_html += (f" · <a href='reply:{m['packet_id']}' {link}>Reply</a>"
+                              f" · <a href='react:{m['packet_id']}' {link}>React</a>")
+            meta_html += "</span>"
+
+            quote = ""
+            if m["reply_id"]:
+                target = by_packet.get(m["reply_id"])
+                quoted = f"{escape(who(target))}: {escape(snippet(target))}" if target else "an earlier message"
+                quote = f"<span style='color:{meta_color}; font-size:small'>↩ {quoted}</span><br>"
+            chips = ""
+            if m["packet_id"] in reactions:
+                grouped = {}
+                for r in reactions[m["packet_id"]]:
+                    grouped.setdefault(r["text"], []).append(who(r))
+                chips = "<br><span style='font-size:small'>" + " · ".join(
+                    f"{escape(emoji)} {escape(', '.join(names))}" for emoji, names in grouped.items()) + "</span>"
 
             if outgoing:
-                body = f"{text}<br>{meta_html}"
+                body = f"{quote}{text}{chips}<br>{meta_html}"
                 align, bg = "right", out_bg
             else:
                 sender = escape(m["from_short"] or m["from_id"] or "?")
                 long_name = f" <span style='color:{meta_color}'>{escape(m['from_long'])}</span>" if m["from_long"] else ""
-                body = f"<b>{sender}</b>{long_name}<br>{text}<br>{meta_html}"
+                body = f"<b>{sender}</b>{long_name}<br>{quote}{text}{chips}<br>{meta_html}"
                 align, bg = "left", in_bg
             parts.append(
                 f"<table width='100%' cellspacing='0' cellpadding='2'><tr><td align='{align}'>"
@@ -308,6 +365,59 @@ class ChatTab(QWidget):
                 f"</td></tr></table>"
             )
         return "".join(parts)
+
+    # ---- replies and reactions ----
+
+    def _message(self, packet_id):
+        kind, key = self.current
+        rows = self.store.thread(channel=key) if kind == "channel" else self.store.thread(peer=key)
+        return next((m for m in rows if m["packet_id"] == packet_id), None)
+
+    def _link_clicked(self, url):
+        action, _, value = url.toString().partition(":")
+        try:
+            packet_id = int(value)
+        except ValueError:
+            return
+        if action == "reply":
+            self.start_reply(packet_id)
+        elif action == "react":
+            menu = QMenu(self)
+            for emoji in REACTIONS:
+                menu.addAction(emoji, lambda e=emoji: self.react(packet_id, e))
+            menu.exec(QCursor.pos())
+
+    def start_reply(self, packet_id):
+        m = self._message(packet_id)
+        if m is None:
+            return
+        name = "yourself" if m["direction"] == "out" else (m["from_short"] or m["from_id"] or "?")
+        text = " ".join((m["text"] or "").split())
+        self._reply_to = packet_id
+        self.reply_label.setText(f"↩ Replying to {name}: {text[:80]}{'…' if len(text) > 80 else ''}")
+        self.reply_bar.show()
+        self.input.setFocus()
+
+    def _clear_reply(self):
+        self._reply_to = None
+        self.reply_bar.hide()
+
+    def react(self, packet_id, emoji):
+        """Send a reaction. It's a small message like any other, so it goes through the gatekeeper."""
+        body = {"text": emoji, "reply_id": packet_id, "emoji": True, **self._destination()}
+
+        def done(result, error):
+            if error:
+                self.win.toast(f"Reaction not sent: {error}", 10000)
+            elif result.get("warning"):
+                self.win.show_result("Reaction sent", result)
+            self.win._poll_data()
+
+        self.win.hub.post("/api/send", body, done)
+
+    def _destination(self):
+        kind, key = self.current
+        return {"to": key} if kind == "dm" else {"channel": key}
 
     # ---- sending ----
 
@@ -323,12 +433,9 @@ class ChatTab(QWidget):
     def _send(self):
         if not self.send_button.isEnabled():
             return
-        kind, key = self.current
-        body = {"text": self.input.text()}
-        if kind == "dm":
-            body["to"] = key
-        else:
-            body["channel"] = key
+        body = {"text": self.input.text(), **self._destination()}
+        if self._reply_to is not None:
+            body["reply_id"] = self._reply_to
         self._sending = True
         self._update_send_state()
 
@@ -338,6 +445,7 @@ class ChatTab(QWidget):
                 self.win.toast(f"Not sent: {error}", 10000)
             else:
                 self.input.clear()
+                self._clear_reply()
                 if result.get("warning"):
                     self.win.show_result("Sent", result)
             self._update_send_state()

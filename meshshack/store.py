@@ -515,14 +515,15 @@ class Store:
         with self._lock, self._conn:
             self._conn.execute("UPDATE packets SET is_local = 1 WHERE from_num = ? AND is_local = 0", (my_num,))
 
-    def record_outgoing_message(self, packet_id, from_num, to_num, channel, text, reply_id=None, now=None):
-        """Record a text message this station sent (the radio doesn't echo these back)."""
+    def record_outgoing_message(self, packet_id, from_num, to_num, channel, text, reply_id=None, now=None, emoji=False):
+        """Record a text message this station sent (the radio doesn't echo these back).
+        emoji: it's a reaction (tapback) to the message whose packet id is reply_id."""
         now = now or time.time()
         with self._lock, self._conn:
             cur = self._conn.execute(
                 """INSERT INTO messages (logged_at, packet_id, from_num, from_id, to_num, to_id,
-                       channel, is_direct, direction, text, reply_id, status, status_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'out', ?, ?, 'sending', ?)""",
+                       channel, is_direct, direction, text, reply_id, emoji, status, status_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'out', ?, ?, ?, 'sending', ?)""",
                 (
                     now,
                     packet_id,
@@ -534,6 +535,7 @@ class Store:
                     int(to_num != BROADCAST_NUM),
                     text,
                     reply_id,
+                    1 if emoji else None,
                     now,
                 ),
             )

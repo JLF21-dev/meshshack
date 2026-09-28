@@ -31,6 +31,7 @@ from .store import BROADCAST_NUM, path_kind
 log = logging.getLogger("meshshack")
 
 MAX_TEXT_BYTES = 200  # what the official apps allow; the hard payload limit is a little higher
+MAX_REACTION_BYTES = 32  # one emoji, including skin tones / joiners
 MAX_LONG_NAME = 39
 MAX_SHORT_NAME = 4
 MAX_CHANNEL_NAME = 11  # bytes, the firmware's limit
@@ -41,6 +42,20 @@ Role = config_pb2.Config.DeviceConfig.Role
 GpsMode = config_pb2.Config.PositionConfig.GpsMode
 # Roles offered in the UI. ROUTER_CLIENT and REPEATER are deprecated; TAK/LOST_AND_FOUND are niche.
 ROLES = ["CLIENT", "CLIENT_MUTE", "CLIENT_HIDDEN", "CLIENT_BASE", "TRACKER", "SENSOR", "ROUTER", "ROUTER_LATE"]
+
+
+def _send_reaction(iface, text, dest, channel, reply_id):
+    """Send a tapback: a text message flagged as an emoji reaction to reply_id. The library's
+    sendData() has no emoji parameter, so this builds the packet the same way sendData does
+    (meshtastic 2.7) and sets the flag. Keep it in step with sendData if the library changes."""
+    packet = mesh_pb2.MeshPacket()
+    packet.channel = channel
+    packet.decoded.payload = text.encode("utf-8")
+    packet.decoded.portnum = portnums_pb2.PortNum.TEXT_MESSAGE_APP
+    packet.decoded.reply_id = reply_id
+    packet.decoded.emoji = 1
+    packet.id = iface._generatePacketId()
+    return iface._sendPacket(packet, dest, wantAck=True)
 
 
 def key_kind(psk):
@@ -215,11 +230,20 @@ class Radio:
 
     # ---- messaging and requests ----
 
-    def send_text(self, text, channel=0, to=None, reply_id=None, source="manual", allow_broadcast=True):
+    def send_text(self, text, channel=0, to=None, reply_id=None, emoji=False, source="manual", allow_broadcast=True):
+        """A text message; with reply_id, a reply to that message (by its packet id); with emoji too,
+        a reaction (tapback): text is the emoji and it attaches to that message."""
         if not isinstance(text, str) or not text.strip():
             raise ApiError(400, "empty message")
         if len(text.encode("utf-8")) > MAX_TEXT_BYTES:
             raise ApiError(400, f"message longer than {MAX_TEXT_BYTES} bytes")
+        if reply_id is not None and (not isinstance(reply_id, int) or not 0 < reply_id <= 0xFFFFFFFF):
+            raise ApiError(400, "reply_id must be a packet id")
+        if emoji:
+            if reply_id is None:
+                raise ApiError(400, "a reaction needs the reply_id of the message it reacts to")
+            if len(text.encode("utf-8")) > MAX_REACTION_BYTES or any(c.isalnum() for c in text):
+                raise ApiError(400, "a reaction is a single emoji")
         dest = parse_node(to) if to is not None else BROADCAST_NUM
         iface = self._iface()
         if dest == BROADCAST_NUM:
@@ -228,6 +252,8 @@ class Radio:
                 raise ApiError(400, f"no channel {channel}")
 
         def send():
+            if emoji:
+                return _send_reaction(iface, text, dest, channel if dest == BROADCAST_NUM else 0, reply_id)
             return iface.sendData(
                 text.encode("utf-8"),
                 destinationId=dest,
@@ -242,7 +268,8 @@ class Radio:
                                  channel=channel if dest == BROADCAST_NUM else None,
                                  source=source, allow_broadcast=allow_broadcast)
         row = self.store.record_outgoing_message(
-            pkt.id, iface.myInfo.my_node_num, dest, channel if dest == BROADCAST_NUM else 0, text, reply_id
+            pkt.id, iface.myInfo.my_node_num, dest, channel if dest == BROADCAST_NUM else 0, text, reply_id,
+            emoji=emoji,
         )
         return _with_warning({"packet_id": pkt.id, "message_row": row}, warning)
 
@@ -625,7 +652,7 @@ def _routes(radio):
         return {"messages": _rows(rows)}
 
     def send(c, b, q):
-        args = body_args(b, "text", optional=("channel", "to", "reply_id"))
+        args = body_args(b, "text", optional=("channel", "to", "reply_id", "emoji"))
         return radio.send_text(**args, source=c.source, allow_broadcast=c.allow_broadcast)
 
     # (method, path) -> (scope needed, handler(caller, body, query))

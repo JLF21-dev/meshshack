@@ -123,7 +123,11 @@ sed "s#@MESHSHACK_DIR@#$PWD#g" desktop/meshshack-autostart.desktop > ~/.config/a
   unread counts. A conversation with unread messages opens with the last one
   you'd read at the top and a "New messages" line above the rest; otherwise
   it opens at the newest. New arrivals keep you at the bottom if you're
-  there, and don't move you if you've scrolled up. Messages show hops and,
+  there, and don't move you if you've scrolled up. Every message has
+  **Reply** and **React** links: a reply quotes the message it answers, and
+  reactions (tapbacks) appear under the message they're for, grouped by
+  emoji. Both are ordinary small messages, so they go through the airtime
+  gatekeeper like any other send. Messages show hops and,
   for messages heard directly, SNR and RSSI. Your sent messages show
   delivery status: `…` sending, `✓` relayed by a neighbor, `✓✓` delivered
   (direct messages only), `✗` failed. The send box counts bytes against

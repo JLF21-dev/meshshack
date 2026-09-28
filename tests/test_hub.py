@@ -154,6 +154,13 @@ class FakeInterface:
         self.sent.append((data, destinationId, kw))
         return mesh_pb2.MeshPacket(id=1000 + len(self.sent))
 
+    def _generatePacketId(self):  # used for reactions, which sendData can't flag
+        return 2000 + len(self.sent)
+
+    def _sendPacket(self, packet, destinationId=BROADCAST_NUM, **kw):
+        self.sent.append((packet, destinationId, kw))
+        return packet
+
 
 @pytest.fixture
 def api(store, tmp_path):
@@ -401,3 +408,23 @@ def test_radio_snapshot_carries_favorites(store):
     assert store.node(BOB)["is_favorite"] == 1
     store.record_node_info({"num": BOB})  # the radio leaves false flags out
     assert store.node(BOB)["is_favorite"] == 0
+
+
+
+def test_replies_and_reactions(api, store):
+    call, iface, _ = api
+    status, body = call("POST", "/api/send", {"text": "agreed", "to": BOB, "reply_id": 4242})
+    assert status == 200 and iface.sent[-1][2]["replyId"] == 4242
+
+    status, body = call("POST", "/api/send", {"text": "👍", "to": BOB, "reply_id": 4242, "emoji": True})
+    assert status == 200
+    packet, dest, kw = iface.sent[-1]
+    assert (packet.decoded.emoji, packet.decoded.reply_id, packet.decoded.payload.decode()) == (1, 4242, "👍")
+    assert dest == BOB and kw["wantAck"]
+    [reaction] = [m for m in store.thread(peer=BOB) if m["emoji"]]
+    assert (reaction["reply_id"], reaction["text"], reaction["direction"]) == (4242, "👍", "out")
+
+    assert call("POST", "/api/send", {"text": "👍", "to": BOB, "emoji": True})[0] == 400  # reacting to what?
+    assert call("POST", "/api/send", {"text": "ok", "to": BOB, "reply_id": 4242, "emoji": True})[0] == 400
+    assert call("POST", "/api/send", {"text": "hi", "to": BOB, "reply_id": "abc"})[0] == 400
+    assert store.tx_log()[0]["kind"] == "dm"  # reactions go through the gatekeeper like any message

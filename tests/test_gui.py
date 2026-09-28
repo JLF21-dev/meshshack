@@ -302,3 +302,49 @@ def test_chat_opens_at_last_read_or_newest(store, qapp, tmp_path):
         assert bar.value() == 10
     finally:
         win.close()
+
+
+def test_replies_and_reactions_in_chat(store, qapp, tmp_path):
+    from PySide6.QtCore import QUrl
+
+    def text(pid, sender, body, reply=None, emoji=None):
+        decoded = {"portnum": "TEXT_MESSAGE_APP", "text": body}
+        if reply:
+            decoded["replyId"] = reply
+        if emoji:
+            decoded["emoji"] = 1
+        store.record_packet({"from": sender, "to": ME, "id": pid, "decoded": decoded})
+
+    text(111, RELAY, "anyone up for a range test?")
+    text(112, RELAY, "👍", reply=111, emoji=True)  # RELAY reacts to its own message
+    store.record_outgoing_message(113, ME, RELAY, 0, "👍", reply_id=111, emoji=True)  # so do we
+    text(114, RELAY, "ok, 7pm then", reply=111)
+    text(115, RELAY, "😂", reply=99999, emoji=True)  # reacts to something not in this view
+
+    win = MainWindow(tmp_path / "test.db")
+    sent = []
+    win.hub.post = lambda path, body, done=None: sent.append((path, body))
+    try:
+        win.show()
+        win.open_dm(RELAY)
+        plain = win.chat.view.toPlainText()
+        assert "👍 RLY, You" in plain  # grouped under the message it reacts to
+        assert "↩ RLY: anyone up for a range test?" in plain  # the reply quotes it
+        assert "RLY reacted 😂 to an earlier message" in plain
+        assert plain.count("👍") == 1  # not also shown as separate lines
+
+        win.chat._link_clicked(QUrl("reply:114"))
+        assert win.chat.reply_bar.isVisibleTo(win) and "ok, 7pm then" in win.chat.reply_label.text()
+        win.chat.input.setText("see you there")
+        win.chat.send_button.setEnabled(True)  # no radio in this test
+        win.chat._send()
+        assert sent[-1] == ("/api/send", {"text": "see you there", "to": RELAY, "reply_id": 114})
+
+        win.chat.start_reply(111)
+        win.chat._clear_reply()  # Esc / ✕
+        assert not win.chat.reply_bar.isVisibleTo(win) and win.chat._reply_to is None
+
+        win.chat.react(114, "❤️")
+        assert sent[-1] == ("/api/send", {"text": "❤️", "reply_id": 114, "emoji": True, "to": RELAY})
+    finally:
+        win.close()
