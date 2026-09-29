@@ -1,11 +1,15 @@
-"""Main window: Chat / Map / Nodes / Device tabs over the logger's database and API."""
+"""Main window: Chat / Map / Nodes / Coverage / Channels / Device tabs over the logger's database and API."""
 
+import faulthandler
+import logging
+import logging.handlers
+import os
 import sys
 from pathlib import Path
 
 # QtWebEngine must be imported before the QApplication exists.
 from PySide6.QtWebEngineWidgets import QWebEngineView  # noqa: F401
-from PySide6.QtCore import QEvent, QSettings, QTimer, Signal
+from PySide6.QtCore import QEvent, QSettings, QTimer, QtMsgType, Signal, qInstallMessageHandler
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import (
     QApplication, QLabel, QMainWindow, QMessageBox, QPushButton, QSystemTrayIcon, QTabWidget,
@@ -204,6 +208,7 @@ class MainWindow(QMainWindow):
         super().closeEvent(event)
 
     def quit_app(self):
+        log.info("Quit from the tray")
         self.quitting = True
         self.close()
         QApplication.instance().quit()
@@ -224,14 +229,52 @@ def _signal_running_instance():
     return True
 
 
+LOG_DIR = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state") / "meshshack"
+log = logging.getLogger("meshshack.gui")
+
+
+def setup_logging():
+    """Send everything the app says to ~/.local/state/meshshack/gui.log.
+
+    A tray app outlives whatever started it, so its stdout/stderr may point at a terminal or pipe
+    that's gone; writing there can end the process with no trace. When not attached to a terminal,
+    point both at the log (this also catches the web engine's helper processes), and log Qt
+    warnings, uncaught Python errors, and a crash's stack trace there too."""
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    path = LOG_DIR / "gui.log"
+    handler = logging.handlers.RotatingFileHandler(path, maxBytes=1_000_000, backupCount=2)
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)-7s %(message)s", "%Y-%m-%d %H:%M:%S"))
+    logger = logging.getLogger("meshshack")
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
+    logger.propagate = False  # the CLI's stderr handler would write every line to the log twice
+    if not sys.stderr.isatty():
+        stream = open(path, "a", buffering=1)
+        os.dup2(stream.fileno(), 1)
+        os.dup2(stream.fileno(), 2)
+    faulthandler.enable(open(LOG_DIR / "gui-crash.log", "a"), all_threads=True)
+
+    def excepthook(kind, value, tb):  # keep running; a bug in one handler shouldn't end the app
+        log.error("Uncaught exception", exc_info=(kind, value, tb))
+
+    sys.excepthook = excepthook
+    levels = {QtMsgType.QtDebugMsg: logging.DEBUG, QtMsgType.QtInfoMsg: logging.INFO,
+              QtMsgType.QtWarningMsg: logging.WARNING, QtMsgType.QtCriticalMsg: logging.ERROR,
+              QtMsgType.QtFatalMsg: logging.CRITICAL}
+    qInstallMessageHandler(lambda kind, _ctx, message: log.log(levels.get(kind, logging.WARNING), "Qt: %s", message))
+    log.info("MeshShack app starting (pid %d)", os.getpid())
+
+
 def run_gui(db_path, start_hidden=False):
     """start_hidden: go straight to the tray (used at login); needs a desktop with a tray."""
+    setup_logging()
     app = QApplication(sys.argv[:1])
     app.setApplicationName("meshshack")
     app.setApplicationDisplayName("MeshShack")
     app.setDesktopFileName("meshshack")
     app.setWindowIcon(app_icon())
     if _signal_running_instance():
+        log.info("Already running; asked it to show its window")
         return 0  # the running app shows its window instead
 
     window = MainWindow(Path(db_path))
@@ -261,4 +304,6 @@ def run_gui(db_path, start_hidden=False):
     server.newConnection.connect(show_window)
     if not start_hidden:
         window.show()
-    return app.exec()
+    code = app.exec()
+    log.info("MeshShack app exiting (code %d)", code)
+    return code

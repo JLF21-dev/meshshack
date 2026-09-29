@@ -1,0 +1,14 @@
+[Unit]
+Description=MeshShack desktop app (system tray)
+# Runs inside your desktop session: starts after login, stops at logout.
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+ExecStart=@MESHSHACK_DIR@/.venv/bin/meshshack gui --tray
+# Brought back if it ever crashes; "Quit" from the tray exits cleanly and stays quit.
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=graphical-session.target

@@ -348,3 +348,30 @@ def test_replies_and_reactions_in_chat(store, qapp, tmp_path):
         assert sent[-1] == ("/api/send", {"text": "❤️", "reply_id": 114, "emoji": True, "to": RELAY})
     finally:
         win.close()
+
+
+def test_gui_logging_keeps_running_after_an_error(tmp_path, monkeypatch, qapp):
+    import logging
+    import sys
+
+    from meshshack.gui import app as gui_app
+
+    monkeypatch.setattr(gui_app, "LOG_DIR", tmp_path / "state")
+    monkeypatch.setattr(sys.stderr, "isatty", lambda: True, raising=False)  # don't redirect pytest's output
+    monkeypatch.setattr(sys, "excepthook", sys.excepthook)
+    logger = logging.getLogger("meshshack")
+    before = list(logger.handlers)
+    try:
+        gui_app.setup_logging()
+        try:
+            raise ValueError("boom in a slot")
+        except ValueError:
+            sys.excepthook(*sys.exc_info())  # logged, not fatal
+        for h in logger.handlers:
+            h.flush()
+        text = (tmp_path / "state" / "gui.log").read_text()
+        assert "MeshShack app starting" in text and "boom in a slot" in text
+    finally:
+        for h in logger.handlers[len(before):]:
+            logger.removeHandler(h)
+        logger.propagate = True

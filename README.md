@@ -114,14 +114,21 @@ connected. A notification pops up when a message arrives while the window
 is hidden. The tray menu has the transmit switch, and "Quit" quits the app.
 The logger keeps recording either way.
 
-**Start at login:** `meshshack gui --tray` starts in the tray without opening
-the window:
+**Start at login:** the tray app runs as a systemd user service tied to your
+desktop session. It starts in the tray when you log in, is **restarted
+automatically if it ever crashes**, and stays quit when you choose Quit:
 
 ```bash
 # run from the meshshack folder; fills in where it's installed
 sed "s#@MESHSHACK_DIR@#$PWD#g" desktop/meshshack.desktop > ~/.local/share/applications/meshshack.desktop
-sed "s#@MESHSHACK_DIR@#$PWD#g" desktop/meshshack-autostart.desktop > ~/.config/autostart/meshshack.desktop
+sed "s#@MESHSHACK_DIR@#$PWD#g" systemd/meshshack-tray.service > ~/.config/systemd/user/meshshack-tray.service
+systemctl --user daemon-reload
+systemctl --user enable --now meshshack-tray
 ```
+
+The app logs to `~/.local/state/meshshack/gui.log`: Qt warnings, uncaught
+errors (which are logged and don't end the app), and its start and exit. A
+crash's stack trace goes to `gui-crash.log` beside it.
 
 - **Chat:** your radio's channels and direct-message conversations with
   unread counts. A conversation with unread messages opens with the last one
