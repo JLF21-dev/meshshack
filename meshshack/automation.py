@@ -383,6 +383,8 @@ class Automation:
 
     def start(self):
         threading.Thread(target=self._loop, name="meshshack-automation", daemon=True).start()
+        jobs = self.store.automation_jobs()
+        log.info("Automation: %d job(s), %d live", len(jobs), sum(1 for j in jobs if j["enabled"] and not j["dry_run"]))
 
     def stop(self):
         self._stop.set()
