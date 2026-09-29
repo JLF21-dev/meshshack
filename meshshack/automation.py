@@ -8,7 +8,11 @@ rules (see README, "Airtime"):
 - New jobs start in dry-run mode: they record what they would have sent, and send nothing.
 - A message is never truncated or sent half-filled: if it renders over 200 bytes, or a data
   source fails, the run is skipped and the reason logged. Nothing is retried.
-- Only schedules trigger jobs; there are no auto-replies to incoming messages.
+- Jobs run on a schedule or on an event about the mesh (a node going quiet or coming back, a
+  node's battery running low, the channel staying busy). Nothing triggers on incoming
+  messages, so there are no auto-replies. An event fires once per change of state, never on
+  what's already true when watching starts. Event jobs default to "notify me" (a desktop
+  notification here; nothing is sent).
 
 Templates use {placeholders}, optionally with a Python format spec: "{weather.temp:.0f}".
 Write {{ and }} for literal braces. Sources:
@@ -21,6 +25,7 @@ Write {{ and }} for literal braces. Sources:
   {weather.name|short|detail|temp|temp_unit|wind|wind_dir}   National Weather Service forecast
   {<source>.<field>}                                         your HTTP/JSON sources
   {cmd.<name>}                                               a local command's first line (opt-in)
+  {event.node|node_long|node_id|quiet_for|last_heard|battery|channel_util|threshold}   event jobs
 """
 
 import hashlib
@@ -72,6 +77,39 @@ PRESETS = {
 }
 
 
+PRESETS.update({
+    "A favorite went quiet (notify me)": {
+        "trigger": {"type": "node_quiet", "node": "favorites", "hours": 6},
+        "destination": {"notify": True},
+        "template": "{event.node} ({event.node_long}) hasn't been heard for {event.quiet_for}.",
+        "sources": [],
+    },
+    "A favorite is back (notify me)": {
+        "trigger": {"type": "node_back", "node": "favorites", "hours": 6},
+        "destination": {"notify": True},
+        "template": "{event.node} is back after about {event.quiet_for} quiet.",
+        "sources": [],
+    },
+    "Low battery on a favorite (notify me)": {
+        "trigger": {"type": "battery_low", "node": "favorites", "below": 20},
+        "destination": {"notify": True},
+        "template": "{event.node}'s battery is down to {event.battery}%.",
+        "sources": [],
+    },
+    "Channel busy (notify me)": {
+        "trigger": {"type": "channel_busy", "above": 25, "minutes": 15},
+        "destination": {"notify": True},
+        "template": "The channel has been over {event.threshold}% busy ({event.channel_util:.0f}% average) "
+                    "for 15 minutes.",
+        "sources": [],
+    },
+})
+
+# What an event job's preview is filled in with, since there may be no real event at hand.
+SAMPLE_EVENT = {"node": "CMP", "node_long": "Campus Router", "node_id": "!11111111", "quiet_for": "7 h",
+                "last_heard": "7 h ago", "battery": 18, "channel_util": 27.5, "threshold": 25}
+
+
 class RenderError(Exception):
     """A template couldn't be filled in; the run is skipped with this as the reason."""
 
@@ -92,7 +130,12 @@ def validate_job(job):
         raise ValueError("name: 1-40 letters, digits, spaces, . ' - _")
     validate_trigger(job.get("trigger") or {})
     dest = job.get("destination") or {}
-    if "to" in dest:
+    if (job.get("trigger") or {}).get("type") == "channel_busy" and not dest.get("notify"):
+        raise ValueError("a busy-channel job can only notify you: sending then would add to the congestion "
+                         "(and the airtime gatekeeper would refuse it anyway)")
+    if dest.get("notify"):
+        pass
+    elif "to" in dest:
         if not isinstance(dest["to"], int) or not 0 < dest["to"] < 0xFFFFFFFF:
             raise ValueError("destination node must be a node number")
     elif not isinstance(dest.get("channel"), int) or not 0 <= dest["channel"] <= 7:
@@ -119,8 +162,34 @@ def validate_job(job):
 
 # ---- scheduling ----
 
+SCHEDULES = ("daily", "weekly", "every")
+EVENTS = ("node_quiet", "node_back", "battery_low", "channel_busy")
+NOTIFY_COOLDOWN = 1800  # a notify-only job tells you about the same node at most every 30 min
+
+
+def _validate_node(value):
+    if value != "favorites" and (not isinstance(value, int) or not 0 < value < 0xFFFFFFFF):
+        raise ValueError("choose a node, or any favorite")
+
+
 def validate_trigger(trigger):
     kind = trigger.get("type")
+    if kind in ("node_quiet", "node_back"):
+        _validate_node(trigger.get("node"))
+        if not isinstance(trigger.get("hours"), (int, float)) or not 1 <= trigger["hours"] <= 720:
+            raise ValueError("quiet means not heard for 1 to 720 hours")
+        return trigger
+    if kind == "battery_low":
+        _validate_node(trigger.get("node"))
+        if not isinstance(trigger.get("below"), int) or not 5 <= trigger["below"] <= 90:
+            raise ValueError("battery threshold: 5 to 90%")
+        return trigger
+    if kind == "channel_busy":
+        if not isinstance(trigger.get("above"), int) or not 5 <= trigger["above"] <= 90:
+            raise ValueError("channel threshold: 5 to 90%")
+        if not isinstance(trigger.get("minutes"), int) or not 5 <= trigger["minutes"] <= 240:
+            raise ValueError("busy for 5 to 240 minutes")
+        return trigger
     if kind in ("daily", "weekly"):
         if not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", str(trigger.get("at", ""))):
             raise ValueError("time must be HH:MM")
@@ -131,12 +200,27 @@ def validate_trigger(trigger):
         if not isinstance(hours, (int, float)) or hours < MIN_EVERY_HOURS:
             raise ValueError(f"repeat at most every {MIN_EVERY_HOURS} hours")
     else:
-        raise ValueError("a schedule is daily, weekly, or every N hours")
+        raise ValueError("a trigger is a schedule (daily, weekly, every N hours) or an event")
     return trigger
 
 
-def describe_trigger(trigger):
+def _node_text(store, node):
+    if node == "favorites":
+        return "a favorite"
+    row = store.node(node) if store is not None else None
+    return (row["short_name"] if row is not None and row["short_name"] else None) or f"!{node:08x}"
+
+
+def describe_trigger(trigger, store=None):
     kind = trigger.get("type")
+    if kind == "node_quiet":
+        return f"when {_node_text(store, trigger['node'])} isn't heard for {trigger['hours']:g} h"
+    if kind == "node_back":
+        return f"when {_node_text(store, trigger['node'])} is back after {trigger['hours']:g} h quiet"
+    if kind == "battery_low":
+        return f"when {_node_text(store, trigger['node'])}'s battery drops below {trigger['below']}%"
+    if kind == "channel_busy":
+        return f"when the channel is over {trigger['above']}% for {trigger['minutes']} min"
     if kind == "daily":
         return f"daily at {trigger['at']}"
     if kind == "weekly":
@@ -225,8 +309,9 @@ class Sources:
     _cache = {}  # key -> (expires_at, value)
     _cache_lock = threading.Lock()
 
-    def __init__(self, store, job=None, status=None, now=None, allow_commands=False):
+    def __init__(self, store, job=None, status=None, now=None, allow_commands=False, event=None):
         self.store = store
+        self.event = event
         self.job = job or {}
         self.status = status or {}
         self.now = now or time.time()
@@ -255,6 +340,10 @@ class Sources:
         }
         if key in simple:
             return simple[key]
+        if head == "event":
+            if self.event is None or rest not in self.event or self.event[rest] is None:
+                raise KeyError(key)
+            return self.event[rest]
         if head == "clock":
             offset = self._cached("clock", 600, ntp_offset_ms)
             return {"offset_ms": offset, "server": NIST_SERVER}[rest]
@@ -337,6 +426,72 @@ class Sources:
         return out.stdout.strip().splitlines()[0] if out.stdout.strip() else ""
 
 
+def _ago(seconds):
+    hours = seconds / 3600
+    return f"{hours:.0f} h" if hours >= 1.5 else f"{max(1, round(seconds / 60))} min"
+
+
+def _node_event(n, now, **extra):
+    return {"node": n["short_name"] or n["node_id"], "node_long": n["long_name"] or n["short_name"] or n["node_id"],
+            "node_id": n["node_id"], "battery": n["battery_level"],
+            "last_heard": f"{_ago(now - n['last_heard'])} ago" if n["last_heard"] else "never", **extra}
+
+
+def evaluate(store, job, now):
+    """Update an event job's per-subject state and return the events that just happened, as
+    [(subject, event values)]. The first look at a subject only records its state: an event is a
+    change, never something that was already true when watching started."""
+    t, fired = job["trigger"], []
+
+    def step(subject, new, event, at=None):
+        """at: when the new state really began (e.g. when a quiet node was last heard)."""
+        prev = store.automation_state(job["id"], subject)
+        if prev is None or prev["state"] != new:
+            store.set_automation_state(job["id"], subject, new, at or now)
+        if prev is not None and prev["state"] != new and event is not None:
+            fired.append((subject, event(prev)))
+
+    if t["type"] in ("node_quiet", "node_back", "battery_low"):
+        if t["node"] == "favorites":
+            me = store.my_num()
+            subjects = [n for n in store.nodes() if n["is_favorite"] and n["num"] != me]
+        else:
+            subjects = [n for n in [store.node(t["node"])] if n is not None]
+        for n in subjects:
+            if t["type"] == "battery_low":
+                b = n["battery_level"]
+                if b is None or b > 100:  # unknown, or on external power
+                    continue
+                prev = store.automation_state(job["id"], n["num"])
+                new = "low" if b < t["below"] else "ok" if b >= t["below"] + 10 else (prev["state"] if prev else "ok")
+                step(n["num"], new, (lambda p, n=n: _node_event(n, now, threshold=t["below"]))
+                     if new == "low" else None)
+                continue
+            quiet = n["last_heard"] is None or now - n["last_heard"] >= t["hours"] * 3600
+            # A quiet state is dated from when the node was last heard, so "back after" is the real absence.
+            since = n["last_heard"] if quiet else None
+            if t["type"] == "node_quiet":
+                step(n["num"], "quiet" if quiet else "ok",
+                     (lambda p, n=n: _node_event(n, now, quiet_for=_ago(now - (n["last_heard"] or now)),
+                                                 threshold=t["hours"])) if quiet else None, at=since)
+            else:  # node_back: it was quiet (for at least `hours`) and has been heard again
+                step(n["num"], "quiet" if quiet else "ok",
+                     (lambda p, n=n: _node_event(n, now, threshold=t["hours"], quiet_for=_ago(now - p["changed_at"])))
+                     if not quiet else None, at=since)
+    elif t["type"] == "channel_busy":
+        rows = store._query(
+            """SELECT t.metrics FROM telemetry t JOIN packets p ON p.id = t.packet_row
+               WHERE p.is_local = 1 AND t.kind = 'deviceMetrics' AND t.logged_at >= ?""", (now - t["minutes"] * 60,))
+        utils = [json.loads(r["metrics"]).get("channelUtilization") for r in rows]
+        utils = [u for u in utils if isinstance(u, (int, float))]
+        if len(utils) >= 3:  # need a few readings to call it sustained
+            avg = sum(utils) / len(utils)
+            prev = store.automation_state(job["id"], 0)
+            new = "busy" if avg > t["above"] else "ok" if avg < t["above"] - 5 else (prev["state"] if prev else "ok")
+            step(0, new, (lambda p: {"channel_util": avg, "threshold": t["above"]}) if new == "busy" else None)
+    return fired
+
+
 PLACEHOLDER = re.compile(r"\{\{|\}\}|\{([A-Za-z_][\w.!\-]*)(?::([^{}]*))?\}")
 
 
@@ -401,6 +556,10 @@ class Automation:
         for job in self.store.automation_jobs():
             if not job["enabled"]:
                 continue
+            if job["trigger"]["type"] in EVENTS:
+                for subject, event in evaluate(self.store, job, now):
+                    self.run(job, now, now, event=event, subject=subject)
+                continue
             slot = latest_slot(job["trigger"], now, anchor=job["created_at"])
             if slot is None or slot <= job["created_at"] - 60:
                 continue  # never fire for times before the job existed
@@ -413,16 +572,23 @@ class Automation:
                 continue
             self.run(job, slot, now)
 
-    def run(self, job, slot, now):
+    def run(self, job, slot, now, event=None, subject=None):
         status = self.radio.status() if self.radio is not None else {}
-        sources = Sources(self.store, job, status, now, allow_commands=self.store.station("automation_commands") is True)
+        sources = Sources(self.store, job, status, now, allow_commands=self.store.station("automation_commands") is True,
+                          event=event)
         try:
             text = render(job["template"], sources)
         except RenderError as ex:
             return self.store.record_automation_run(job["id"], slot, "skipped", None, str(ex), now=now)
+        dest = job["destination"]
+        if dest.get("notify"):  # nothing is transmitted; the app shows it as a desktop notification
+            recent = self.store.automation_runs(limit=20, job_id=job["id"])
+            if any(r["status"] == "notified" and r["subject"] == subject and now - r["at"] < NOTIFY_COOLDOWN
+                   for r in recent):
+                return None  # already told you about this very recently
+            return self.store.record_automation_run(job["id"], slot, "notified", text, None, now=now, subject=subject)
         if job["dry_run"]:
             return self.store.record_automation_run(job["id"], slot, "dry run", text, "dry run: nothing sent", now=now)
-        dest = job["destination"]
         try:
             result = self.radio.send_text(text, channel=dest.get("channel", 0), to=dest.get("to"),
                                           source=gate_source(job), allow_broadcast="to" not in dest)
@@ -434,9 +600,12 @@ class Automation:
 
 
 def preview(store, job, status=None):
-    """Render a job now with live data, without sending: (text or None, problem or None)."""
+    """Render a job now with live data, without sending: (text or None, problem or None).
+    An event job is filled in with SAMPLE_EVENT."""
+    event = SAMPLE_EVENT if (job.get("trigger") or {}).get("type") in EVENTS else None
     try:
-        text = render(job["template"], Sources(store, job, status, allow_commands=store.station("automation_commands") is True))
+        text = render(job["template"], Sources(store, job, status, allow_commands=store.station("automation_commands") is True,
+                                               event=event))
         return text, None
     except RenderError as ex:
         return None, str(ex)

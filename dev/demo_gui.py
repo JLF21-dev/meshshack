@@ -112,6 +112,10 @@ store.record_automation_run(wx, now - 86400, "sent", "Weather Today: Sunny, 71°
                             now=now - 86400 + 240)
 store.record_automation_run(wx, now - 3600, "skipped", None, "Paused: the channel is busy (24% utilization, limit 20%)",
                             now=now - 3600 + 300)
+quiet = store.save_automation_job({**PRESETS["A favorite went quiet (notify me)"], "name": "A favorite went quiet"},
+                                  now=now - 30 * 86400)
+store.record_automation_run(quiet, now - 5400, "notified", "SOL (Solar Relay) hasn't been heard for 6 h.", None,
+                            now=now - 5400, subject=0x22222222)
 
 iface = FakeInterface()
 iface.localNode.localConfig.device.role = 12  # CLIENT_BASE

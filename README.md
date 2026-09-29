@@ -216,9 +216,20 @@ crash's stack trace goes to `gui-crash.log` beside it.
   them on. **Test alert** checks the banner and sound. MeshShack never
   sends anything in response. `meshshack alerts` lists them
   (`meshshack alerts ack all`).
-- **Automation:** messages you define, sent on a schedule (daily, weekly,
-  or every N hours, at least 6), with content filled in when they run. The
-  logger runs them, so they work with the app closed.
+- **Automation:** messages you define, with content filled in when they
+  run. The logger runs them, so they work with the app closed. A job runs on
+  a **schedule** (daily, weekly, or every N hours, at least 6) or on an
+  **event**: a node (or any favorite) going quiet for N hours, coming back
+  after being quiet, its battery dropping below X% (external power ignored;
+  it re-arms 10 points higher), or the channel staying over X% for M
+  minutes. An event fires once per change, never for what was already true
+  when watching started. Event jobs default to **notify me**: a desktop
+  notification and a log entry, with nothing transmitted (and a
+  busy-channel job can only notify, since sending then would add to the
+  congestion). They can also send, under the same limits. Nothing
+  triggers on incoming messages. Event placeholders: `{event.node}`,
+  `{event.node_long}`, `{event.quiet_for}`, `{event.last_heard}`,
+  `{event.battery}`, `{event.channel_util}`, `{event.threshold}`.
   - **Templates** with placeholders: `{time}`, `{date}`, `{time_utc}`;
     `{clock.offset_ms:+.0f}` (this computer's clock checked against NIST's
     time servers); station stats like `{station.nodes_heard_7d}` or
@@ -228,7 +239,9 @@ crash's stack trace goes to `gui-crash.log` beside it.
     about 1 km before it's sent); fields from **any HTTP/JSON API** you add
     as a data source (`{aq.pm25}` for a field picked by path such as
     `current.pm25`); and, if you allow it, a local command's output.
-  - **Presets:** weekly NIST time check, daily weather, weekly mesh stats.
+  - **Presets:** weekly NIST time check, daily weather, weekly mesh stats,
+    and (notify me) a favorite went quiet, is back, or has a low battery, and
+    the channel is busy.
   - **Preview** fills a message in with live data and shows its length,
     without sending.
   - **Safety:** new jobs are **dry runs** that record what they would have

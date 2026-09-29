@@ -77,6 +77,10 @@ class MainWindow(QMainWindow):
         central_layout.addWidget(self.tabs, 1)
         self.setCentralWidget(central)
         QTimer.singleShot(0, self.alert_center.check)
+        # Automation jobs that "notify me" show up as desktop notifications (only new ones).
+        runs = self.store.automation_runs(limit=1)
+        self._last_notified = runs[0]["id"] if runs else 0
+        self.dataChanged.connect(self._show_automation_notifications)
         self.chat.unreadChanged.connect(self._show_unread)
 
         self.connection_label = QLabel()
@@ -142,6 +146,16 @@ class MainWindow(QMainWindow):
             if "channelUtilization" in metrics:
                 text += f" · channel util {metrics['channelUtilization']:.1f}%"
         self.connection_label.setText(text)
+
+    def _show_automation_notifications(self):
+        new = [r for r in self.store.automation_runs(limit=20) if r["id"] > self._last_notified]
+        if not new:
+            return
+        self._last_notified = max(r["id"] for r in new)
+        for run in reversed([r for r in new if r["status"] == "notified"]):
+            if self.tray is not None:
+                self.tray.showMessage(f"MeshShack: {run['job_name']}", run["text"] or "", app_icon(), 15000)
+            self.toast(f"{run['job_name']}: {run['text']}", 15000)
 
     def _show_transmit(self):
         on = self.gate.transmit_enabled()

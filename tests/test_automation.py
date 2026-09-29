@@ -250,3 +250,153 @@ def test_api_is_app_only(store, tmp_path):
         assert call("POST", "/api/automation/save", job(name="x"), token=other)[0] == 403
     finally:
         server.stop()
+
+
+# ---- event triggers ----
+
+CAR, HUT, ME = 0x0CA20001, 0x0B070002, 0xA1B2C3D4
+
+
+def heard(store, num, at, battery=None, short=None):
+    store.record_packet({"from": num, "to": BROADCAST_NUM, "id": int(at) % 100000 + num % 97, "rxSnr": 1.0,
+                         "hopStart": 3, "hopLimit": 2, "decoded": {"portnum": "TELEMETRY_APP", "telemetry": {
+                             "deviceMetrics": {"batteryLevel": battery} if battery is not None else {}}}}, now=at)
+    if short:
+        store.record_node_info({"num": num, "user": {"shortName": short, "longName": f"{short} long"}})
+
+
+def event_job(store, clock, trigger, template, dest=None, **extra):
+    return store.save_automation_job({**job(name=f"ev {len(store.automation_jobs())}", trigger=trigger, template=template,
+                                            destination=dest or {"notify": True}), **extra}, now=clock["now"])
+
+
+def test_node_quiet_and_back(store, runner):
+    auto, clock, iface = runner
+    heard(store, CAR, clock["now"], short="CAR")
+    event_job(store, clock, {"type": "node_quiet", "node": CAR, "hours": 6}, "{event.node} quiet for {event.quiet_for}")
+    event_job(store, clock, {"type": "node_back", "node": CAR, "hours": 6}, "{event.node} back after {event.quiet_for}")
+    auto.tick()
+    assert store.automation_runs() == []  # first look: learn the state, don't fire
+    clock["now"] += 7 * 3600
+    auto.tick()
+    auto.tick()
+    [run] = store.automation_runs()
+    assert run["status"] == "notified" and run["text"] == "CAR quiet for 7 h" and not iface.sent
+    clock["now"] += 3 * 3600
+    heard(store, CAR, clock["now"])
+    auto.tick()
+    back = store.automation_runs()[0]
+    assert back["status"] == "notified" and back["text"] == "CAR back after 10 h"  # quiet 6 h + noticed + 3 h more
+    auto.tick()
+    assert len(store.automation_runs()) == 2  # once per change
+
+
+def test_quiet_at_start_does_not_fire(store, runner):
+    auto, clock, iface = runner
+    heard(store, CAR, clock["now"] - 10 * 3600, short="CAR")
+    event_job(store, clock, {"type": "node_quiet", "node": CAR, "hours": 6}, "{event.node} quiet")
+    auto.tick()
+    clock["now"] += 3600
+    auto.tick()
+    assert store.automation_runs() == []
+
+
+def test_favorites_and_battery_hysteresis(store, runner):
+    auto, clock, iface = runner
+    for num, short in ((CAR, "CAR"), (HUT, "HUT")):
+        heard(store, num, clock["now"], battery=60, short=short)
+        store.set_node_flags(num, favorite=True)
+    store.record_packet({"from": ME, "to": BROADCAST_NUM, "id": 1, "decoded": {"portnum": "TELEMETRY_APP"}}, local=True)
+    store.set_node_flags(ME, favorite=True)  # this station is never its own subject
+    event_job(store, clock, {"type": "battery_low", "node": "favorites", "below": 20}, "{event.node} at {event.battery}%")
+    auto.tick()
+    for battery, expect in ((18, 1), (19, 1), (25, 1), (31, 1), (15, 2), (101, 2)):
+        clock["now"] += 3600
+        heard(store, HUT, clock["now"], battery=battery)
+        auto.tick()
+        assert len(store.automation_runs()) == expect, battery
+    assert [r["text"] for r in store.automation_runs()] == ["HUT at 15%", "HUT at 18%"]
+    subjects = {row["subject"] for row in store._query("SELECT subject FROM automation_state")}
+    assert subjects == {CAR, HUT}
+
+
+def test_channel_busy_is_notify_only(store, runner):
+    auto, clock, iface = runner
+    with pytest.raises(ValueError, match="only notify"):
+        automation.validate_job(job(trigger={"type": "channel_busy", "above": 25, "minutes": 15}))
+    event_job(store, clock, {"type": "channel_busy", "above": 25, "minutes": 15}, "busy {event.channel_util:.0f}%")
+    for i, util in enumerate([10, 11, 12, 10, 11, 30, 32, 34, 36, 38, 40]):  # a reading every 3 min
+        clock["now"] += 180
+        store.record_packet({"from": ME, "to": BROADCAST_NUM, "id": 900 + i, "decoded": {"portnum": "TELEMETRY_APP",
+                             "telemetry": {"deviceMetrics": {"channelUtilization": util}}}}, now=clock["now"], local=True)
+        auto.tick()
+    [run] = store.automation_runs()
+    assert run["status"] == "notified" and run["text"].startswith("busy ")
+
+
+def test_notify_cooldown_and_sending_event_jobs(store, runner):
+    auto, clock, iface = runner
+    event_job(store, clock, {"type": "channel_busy", "above": 25, "minutes": 5}, "busy")
+
+    def readings(*utils):
+        for u in utils:
+            clock["now"] += 100
+            store.record_packet({"from": ME, "to": BROADCAST_NUM, "id": int(clock["now"]) % 100000,
+                                 "decoded": {"portnum": "TELEMETRY_APP", "telemetry": {"deviceMetrics": {
+                                     "channelUtilization": u}}}}, now=clock["now"], local=True)
+            auto.tick()
+
+    readings(5, 5, 5, 40, 40, 40, 40)  # busy: notified
+    readings(5, 5, 5, 5, 40, 40, 40, 40)  # ok, then busy again within 30 min: held off
+    assert [r["status"] for r in store.automation_runs()].count("notified") == 1
+    clock["now"] += 1800
+    readings(5, 5, 5, 5, 40, 40, 40, 40)  # and again, past the cooldown: notified
+    assert [r["status"] for r in store.automation_runs()].count("notified") == 2
+
+    heard(store, HUT, clock["now"], short="HUT")
+    sender = event_job(store, clock, {"type": "node_quiet", "node": HUT, "hours": 1}, "{event.node} is quiet",
+                       dest={"channel": 0}, dry_run=False)
+    auto.tick()
+    clock["now"] += 3700
+    auto.tick()
+    run = store.automation_runs(job_id=sender)[0]
+    assert run["status"] == "sent" and iface.sent[-1][0] == "HUT is quiet"
+    assert store.tx_log()[0]["source"] == f"automation:job{sender}"  # through the gatekeeper
+
+
+def test_changing_a_trigger_resets_its_state(store, runner):
+    auto, clock, iface = runner
+    heard(store, CAR, clock["now"], short="CAR")
+    job_id = event_job(store, clock, {"type": "node_quiet", "node": CAR, "hours": 6}, "x")
+    auto.tick()
+    assert store.automation_state(job_id, CAR) is not None
+    store.save_automation_job({**store.automation_job(job_id), "trigger": {"type": "node_quiet", "node": CAR, "hours": 2}})
+    assert store.automation_state(job_id, CAR) is None
+
+
+def test_event_preview_uses_a_sample(store):
+    text, problem = automation.preview(store, {**automation.PRESETS["A favorite went quiet (notify me)"],
+                                               "name": "p"})
+    assert problem is None and text == "CMP (Campus Router) hasn't been heard for 7 h."
+    assert automation.describe_trigger({"type": "battery_low", "node": "favorites", "below": 20}) == \
+        "when a favorite's battery drops below 20%"
+
+
+def test_app_shows_notify_runs(store, tmp_path):
+    pytest.importorskip("PySide6")
+    import os
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+
+    from meshshack.gui.app import MainWindow
+
+    app = QApplication.instance() or QApplication([])  # noqa: F841
+    job_id = store.save_automation_job({**job(), "destination": {"notify": True}})
+    store.record_automation_run(job_id, 1, "notified", "an old one", None)  # before the app started: not shown
+    win = MainWindow(tmp_path / "test.db")
+    try:
+        store.record_automation_run(job_id, 2, "notified", "CAR hasn't been heard for 7 h.", None)
+        win.dataChanged.emit()
+        assert "CAR hasn't been heard" in win.statusBar().currentMessage()
+    finally:
+        win.close()

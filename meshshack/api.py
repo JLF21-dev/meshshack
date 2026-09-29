@@ -670,14 +670,17 @@ def _routes(radio):
         return {"acknowledged": store.acknowledge_alerts(ids)}
 
     def automation_state(c, b, q):
-        from .automation import PRESETS, describe_trigger, gate_source, jitter, next_slot
+        from .automation import EVENTS, PRESETS, describe_trigger, gate_source, jitter, next_slot
 
         now = time.time()
         jobs = []
         for job in store.automation_jobs():
-            nxt = next_slot(job["trigger"], now, anchor=job["created_at"])
-            jobs.append({**job, "schedule": describe_trigger(job["trigger"]), "gate_source": gate_source(job),
-                         "next_run": nxt + jitter(job["id"], nxt) if job["enabled"] else None})
+            nxt = None
+            if job["enabled"] and job["trigger"]["type"] not in EVENTS:
+                nxt = next_slot(job["trigger"], now, anchor=job["created_at"])
+                nxt += jitter(job["id"], nxt)
+            jobs.append({**job, "schedule": describe_trigger(job["trigger"], store), "gate_source": gate_source(job),
+                         "next_run": nxt})
         return {"jobs": jobs, "runs": _rows(store.automation_runs(limit=q.limit(100))), "presets": PRESETS,
                 "allow_commands": store.station("automation_commands") is True}
 

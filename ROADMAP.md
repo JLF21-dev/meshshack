@@ -85,8 +85,9 @@ in at send time from data sources, including external APIs. Proposed shape:
   total, paused above 20% channel utilization, 30 s apart); no auto-replies
   to incoming messages; a per-job log of what was sent or skipped, and why.
 
-- [ ] Event triggers (a favorite node going quiet or coming back, the channel
-  staying busy): not built yet; schedules only for now.
+- [x] Event triggers: a node (or any favorite) going quiet or coming back, a
+  low battery, the channel staying busy; once per change; "notify me" by
+  default (nothing sent); busy-channel jobs can only notify.
 
 **Deferred from the API (roadmap step 3)**
 - [ ] Optional output to a local MQTT broker (Home Assistant and similar),

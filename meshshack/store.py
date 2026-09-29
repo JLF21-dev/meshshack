@@ -171,9 +171,18 @@ CREATE TABLE IF NOT EXISTS automation_runs (
     status     TEXT NOT NULL,          -- sent, dry run, skipped, missed
     text       TEXT,
     detail     TEXT,
-    packet_id  INTEGER
+    packet_id  INTEGER,
+    subject    INTEGER                 -- for event jobs: the node it was about (0 for the channel)
 );
 CREATE INDEX IF NOT EXISTS automation_runs_job ON automation_runs (job_id, slot);
+-- Event jobs' last known state per subject (node, or 0 for the channel), to fire only on a change.
+CREATE TABLE IF NOT EXISTS automation_state (
+    job_id      INTEGER NOT NULL,
+    subject     INTEGER NOT NULL,
+    state       TEXT NOT NULL,
+    changed_at  REAL NOT NULL,
+    PRIMARY KEY (job_id, subject)
+);
 
 -- Small facts about this station that the radio doesn't hand back, e.g. the exact fixed
 -- position (the radio only reports it rounded to the channel's position precision).
@@ -212,7 +221,7 @@ CREATE INDEX IF NOT EXISTS messages_logged_at ON messages (logged_at);
 CREATE INDEX IF NOT EXISTS messages_packet_id ON messages (packet_id);
 """
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 REQUEST_TIMEOUT = 180
 
 
@@ -317,6 +326,9 @@ class Store:
             with self._conn:
                 self._conn.execute("UPDATE packets SET hop_limit = 0 WHERE hop_start IS NOT NULL AND hop_limit IS NULL")
             self._migrate_v2()
+        if version < 6:
+            with self._conn:
+                self._add_column("automation_runs", "subject", "INTEGER")
         self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     def _add_column(self, table, column, decl):
@@ -639,27 +651,49 @@ class Store:
                     return self._conn.execute(
                         """INSERT INTO automation_jobs (name, enabled, dry_run, trigger, destination, template, sources,
                                created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""", (*values, now, now)).lastrowid
+                old = self._conn.execute("SELECT trigger FROM automation_jobs WHERE id = ?", (job["id"],)).fetchone()
                 self._conn.execute(
                     """UPDATE automation_jobs SET name = ?, enabled = ?, dry_run = ?, trigger = ?, destination = ?,
                            template = ?, sources = ?, updated_at = ? WHERE id = ?""", (*values, now, job["id"]))
+                if old is not None and json.loads(old["trigger"]) != job["trigger"]:
+                    # A changed trigger watches something else: start over (learn the state, don't fire).
+                    self._conn.execute("DELETE FROM automation_state WHERE job_id = ?", (job["id"],))
                 return job["id"]
             except sqlite3.IntegrityError:
                 raise ValueError(f"there's already a job named {job['name']!r}")
 
     def delete_automation_job(self, job_id):
         with self._lock, self._conn:
+            self._conn.execute("DELETE FROM automation_state WHERE job_id = ?", (job_id,))
             return self._conn.execute("DELETE FROM automation_jobs WHERE id = ?", (job_id,)).rowcount > 0
+
+    def automation_state(self, job_id, subject):
+        rows = self._query("SELECT * FROM automation_state WHERE job_id = ? AND subject = ?", (job_id, subject))
+        return rows[0] if rows else None
+
+    def set_automation_state(self, job_id, subject, state, now=None):
+        with self._lock, self._conn:
+            self._conn.execute(
+                """INSERT INTO automation_state (job_id, subject, state, changed_at) VALUES (?, ?, ?, ?)
+                   ON CONFLICT (job_id, subject) DO UPDATE SET state = excluded.state, changed_at = excluded.changed_at""",
+                (job_id, subject, state, now or time.time()),
+            )
+
+    def my_num(self):
+        """This station's node number, as the log knows it: the sender of its own (local) reports."""
+        rows = self._query("SELECT from_num FROM packets WHERE is_local = 1 GROUP BY from_num ORDER BY COUNT(*) DESC LIMIT 1")
+        return rows[0]["from_num"] if rows else None
 
     def automation_ran(self, job_id, slot):
         return bool(self._query("SELECT 1 FROM automation_runs WHERE job_id = ? AND slot = ?", (job_id, slot)))
 
-    def record_automation_run(self, job_id, slot, status, text, detail, packet_id=None, now=None):
+    def record_automation_run(self, job_id, slot, status, text, detail, packet_id=None, now=None, subject=None):
         job = self.automation_job(job_id)
         with self._lock, self._conn:
             self._conn.execute(
-                """INSERT INTO automation_runs (job_id, job_name, slot, at, status, text, detail, packet_id)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                (job_id, job["name"] if job else None, slot, now or time.time(), status, text, detail, packet_id),
+                """INSERT INTO automation_runs (job_id, job_name, slot, at, status, text, detail, packet_id, subject)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (job_id, job["name"] if job else None, slot, now or time.time(), status, text, detail, packet_id, subject),
             )
         return {"status": status, "text": text, "detail": detail}
 

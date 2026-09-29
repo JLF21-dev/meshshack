@@ -21,11 +21,14 @@ PLACEHOLDER_HELP = (
     "{station.direct_neighbors_24h} · {node.SHORT.battery} (also voltage, snr, hops, name, last_heard) · "
     "{weather.name} {weather.short} {weather.temp} {weather.temp_unit} {weather.wind} {weather.wind_dir} "
     "(US National Weather Service, for this station's area) · {yoursource.field} from the data sources "
-    "below · {cmd.name} for a local command. Add a format after a colon, e.g. {weather.temp:.0f}. "
-    "Use {{ and }} for literal braces.")
+    "below · {cmd.name} for a local command · for event jobs: {event.node} {event.node_long} {event.quiet_for} "
+    "{event.last_heard} {event.battery} {event.channel_util:.0f} {event.threshold}. Add a format after a colon, "
+    "e.g. {weather.temp:.0f}. Use {{ and }} for literal braces. Preview fills event jobs with a sample event.")
 
 
 def destination_text(dest, win):
+    if dest.get("notify"):
+        return "notify me (nothing sent)"
     if "to" in dest:
         row = win.store.node(dest["to"])
         name = (row["short_name"] if row is not None and row["short_name"] else None) or f"!{dest['to']:08x}"
@@ -47,7 +50,10 @@ class JobDialog(QDialog):
         self.name = QLineEdit(self.job.get("name", ""))
         trigger = self.job.get("trigger") or {"type": "daily", "at": "07:00"}
         self.kind = QComboBox()
-        for label, kind in (("Daily", "daily"), ("Weekly", "weekly"), ("Every N hours", "every")):
+        for label, kind in (("Daily", "daily"), ("Weekly", "weekly"), ("Every N hours", "every"),
+                            ("When a node goes quiet", "node_quiet"), ("When a node comes back", "node_back"),
+                            ("When a node's battery is low", "battery_low"),
+                            ("When the channel stays busy", "channel_busy")):
             self.kind.addItem(label, kind)
         self.kind.setCurrentIndex(max(0, self.kind.findData(trigger["type"])))
         self.at = QTimeEdit(QTime.fromString(trigger.get("at", "07:00"), "HH:mm"))
@@ -59,20 +65,45 @@ class JobDialog(QDialog):
         self.hours.setRange(6, 24 * 14)
         self.hours.setSuffix(" hours")
         self.hours.setValue(int(trigger.get("hours", 24)))
+        # Event trigger fields
+        self.node = QComboBox()
+        self.node.addItem("any favorite", "favorites")
+        me = win.my_num
+        for n in win.store.nodes():
+            if n["num"] != me and n["short_name"]:
+                self.node.addItem(f"{n['short_name']}  {n['long_name'] or ''}".strip(), n["num"])
+        self.node.setCurrentIndex(max(0, self.node.findData(trigger.get("node", "favorites"))))
+        self.quiet_hours = QSpinBox()
+        self.quiet_hours.setRange(1, 720)
+        self.quiet_hours.setPrefix("quiet ≥ ")
+        self.quiet_hours.setSuffix(" h")
+        self.quiet_hours.setValue(int(trigger.get("hours", 6)) if trigger["type"] in ("node_quiet", "node_back") else 6)
+        self.percent = QSpinBox()
+        self.percent.setRange(5, 90)
+        self.percent.setSuffix(" %")
+        self.percent.setValue(trigger.get("below", trigger.get("above", 20)))
+        self.minutes = QSpinBox()
+        self.minutes.setRange(5, 240)
+        self.minutes.setPrefix("for ")
+        self.minutes.setSuffix(" min")
+        self.minutes.setValue(trigger.get("minutes", 15))
         self.kind.currentIndexChanged.connect(self._schedule_fields)
         schedule = QHBoxLayout()
-        for w in (self.kind, self.weekday, self.at, self.hours):
+        for w in (self.kind, self.weekday, self.at, self.hours, self.node, self.quiet_hours, self.percent, self.minutes):
             schedule.addWidget(w)
         schedule.addStretch(1)
 
         dest = self.job.get("destination") or {"channel": 0}
         self.dest = QComboBox()
+        self.dest.addItem("Notify me on this computer (nothing sent)", ("notify", None))
         for ch in win.status.get("channels", []) or [{"index": 0, "name": "Primary"}]:
             self.dest.addItem(f"# {ch['name']} (broadcast on channel {ch['index']})", ("channel", ch["index"]))
         self.dest.addItem("Direct message to a node…", ("to", None))
         self.dm_node = QLineEdit()
         self.dm_node.setPlaceholderText("short name or !id")
-        if "to" in dest:
+        if dest.get("notify"):
+            self.dest.setCurrentIndex(0)
+        elif "to" in dest:
             self.dest.setCurrentIndex(self.dest.count() - 1)
             row = win.store.node(dest["to"])
             self.dm_node.setText(row["short_name"] if row is not None and row["short_name"] else f"!{dest['to']:08x}")
@@ -120,7 +151,7 @@ class JobDialog(QDialog):
 
         form = QFormLayout()
         form.addRow("Name", self.name)
-        form.addRow("Schedule", schedule)
+        form.addRow("Trigger", schedule)
         form.addRow("Sends to", dest_row)
         form.addRow("Message", self.template)
         form.addRow("", help_label)
@@ -146,9 +177,17 @@ class JobDialog(QDialog):
 
     def _schedule_fields(self):
         kind = self.kind.currentData()
-        self.at.setVisible(kind != "every")
+        self.at.setVisible(kind in ("daily", "weekly"))
         self.weekday.setVisible(kind == "weekly")
         self.hours.setVisible(kind == "every")
+        self.node.setVisible(kind in ("node_quiet", "node_back", "battery_low"))
+        self.quiet_hours.setVisible(kind in ("node_quiet", "node_back"))
+        self.percent.setVisible(kind in ("battery_low", "channel_busy"))
+        self.percent.setPrefix("below " if kind == "battery_low" else "over ")
+        self.minutes.setVisible(kind == "channel_busy")
+        if kind == "channel_busy":  # sending then would only add to the congestion
+            self.dest.setCurrentIndex(0)
+        self.dest.setEnabled(kind != "channel_busy")
 
     def _add_source(self, s):
         r = self.sources.rowCount()
@@ -171,8 +210,18 @@ class JobDialog(QDialog):
             trigger["weekday"] = self.weekday.currentIndex()
         if kind == "every":
             trigger["hours"] = self.hours.value()
+        if kind in ("node_quiet", "node_back", "battery_low"):
+            trigger["node"] = self.node.currentData()
+        if kind in ("node_quiet", "node_back"):
+            trigger["hours"] = self.quiet_hours.value()
+        if kind == "battery_low":
+            trigger["below"] = self.percent.value()
+        if kind == "channel_busy":
+            trigger["above"], trigger["minutes"] = self.percent.value(), self.minutes.value()
         what, index = self.dest.currentData()
-        if what == "channel":
+        if what == "notify":
+            dest = {"notify": True}
+        elif what == "channel":
             dest = {"channel": index}
         else:
             name = self.dm_node.text().strip()
@@ -234,7 +283,7 @@ class JobDialog(QDialog):
 
 
 class AutomationTab(QWidget):
-    JOB_COLUMNS = ["Job", "Schedule", "Sends to", "Mode", "Next run", "Last result"]
+    JOB_COLUMNS = ["Job", "Trigger", "Sends to", "Mode", "Next run", "Last result"]
     RUN_COLUMNS = ["Time", "Job", "Result", "Message, or why not"]
 
     def __init__(self, win):
@@ -243,7 +292,9 @@ class AutomationTab(QWidget):
         self.state = {"jobs": [], "runs": [], "presets": {}, "allow_commands": False}
 
         intro = QLabel(
-            "Your own messages, sent on a schedule, with content from data sources. This is the one part of "
+            "Your own messages, on a schedule or when something happens on the mesh (a node goes quiet or comes "
+            "back, a battery runs low, the channel stays busy), with content from data sources. Event jobs "
+            "default to notifying you here, sending nothing. This is the one part of "
             "MeshShack that transmits by itself, so each job sends at most every 6 hours, at most 4 automated "
             "sends go out a day in total, 30 s apart, never while the channel is busy (over 20%) or transmitting "
             "is switched off. A message that's too long, or whose data can't be fetched, is skipped, never "
@@ -344,8 +395,10 @@ class AutomationTab(QWidget):
             last[run["job_id"]] = run
         self.jobs.setRowCount(len(jobs))
         for r, job in enumerate(jobs):
-            mode = "Off" if not job["enabled"] else "Dry run" if job["dry_run"] else "LIVE"
-            nxt = time.strftime("%a %b %-d %H:%M", time.localtime(job["next_run"])) if job["next_run"] else "—"
+            mode = ("Off" if not job["enabled"] else "Notify" if job["destination"].get("notify")
+                    else "Dry run" if job["dry_run"] else "LIVE")
+            nxt = (time.strftime("%a %b %-d %H:%M", time.localtime(job["next_run"])) if job["next_run"]
+                   else "on event" if job["enabled"] else "—")
             run = last.get(job["id"])
             result = f"{run['status']} {time.strftime('%b %-d %H:%M', time.localtime(run['at']))}" if run else "not yet"
             for c, text in enumerate((job["name"], job["schedule"], destination_text(job["destination"], self.win),
@@ -368,8 +421,9 @@ class AutomationTab(QWidget):
                 self.runs.setItem(r, c, QTableWidgetItem(text))
         menu = QMenu(self.preset_button)
         for name in self.state["presets"]:
-            menu.addAction(name, lambda n=name: self._open_editor({**self.state["presets"][n], "name": n,
-                                                                    "destination": {"channel": 0}}))
+            preset = self.state["presets"][name]
+            menu.addAction(name, lambda n=name, p=preset: self._open_editor(
+                {**p, "name": n, "destination": p.get("destination") or {"channel": 0}}))
         self.preset_button.setMenu(menu)
         self.allow_commands.setChecked(self.state["allow_commands"])
         self._update_buttons()
@@ -388,6 +442,7 @@ class AutomationTab(QWidget):
         if job is not None:
             self.buttons["toggle"].setText("Turn off" if job["enabled"] else "Turn on")
             self.buttons["live"].setText("Back to dry run" if not job["dry_run"] else "Go live…")
+            self.buttons["live"].setEnabled(not job["destination"].get("notify"))  # sends nothing either way
 
     # ---- actions ----
 
