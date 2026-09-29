@@ -10,7 +10,8 @@ import time
 from collections import defaultdict
 from xml.sax.saxutils import escape
 
-from .store import path_kind
+from .coverage import station_from_store
+from .paths import summarize
 
 
 def _iso(ts):
@@ -18,7 +19,7 @@ def _iso(ts):
 
 
 def nodes_csv(store, out, since=None):
-    via = store.heard_via()
+    paths = summarize(store, station_from_store(store))
     rows = store.nodes(since=since)
     writer = csv.writer(out)
     writer.writerow(["node_id", "short_name", "long_name", "hw_model", "role", "heard_via", "first_seen",
@@ -27,7 +28,7 @@ def nodes_csv(store, out, since=None):
                      "favorite", "ignored"])
     for n in rows:
         writer.writerow([n["node_id"], n["short_name"], n["long_name"], n["hw_model"], n["role"],
-                         path_kind(*via.get(n["num"], (0, 0))), _iso(n["first_seen"]), _iso(n["last_heard"]),
+                         (paths.get(n["num"]) or {}).get("kind", "unknown"), _iso(n["first_seen"]), _iso(n["last_heard"]),
                          _iso(n["rf_heard"]), _iso(n["direct_heard"]), n["last_snr"], n["last_rssi"],
                          n["hops_away"], n["battery_level"], n["voltage"], n["latitude"], n["longitude"],
                          n["altitude"], n["is_favorite"], n["is_ignored"]])

@@ -26,7 +26,7 @@ from google.protobuf import json_format
 from meshtastic.protobuf import apponly_pb2, channel_pb2, config_pb2, mesh_pb2, portnums_pb2, telemetry_pb2
 
 from .airtime import Gatekeeper, Refused
-from .store import BROADCAST_NUM, path_kind
+from .store import BROADCAST_NUM
 
 log = logging.getLogger("meshshack")
 
@@ -635,11 +635,15 @@ def _routes(radio):
         return {k: body[k] for k in (*required, *optional) if k in body}
 
     def nodes(c, b, q):
-        via = store.heard_via()
+        from .coverage import station_from_store
+        from .paths import summarize
+
+        paths = summarize(store, station_from_store(store))
         out = []
         for n in store.nodes(since=q.since())[: q.limit(500)]:
             d = dict(n)
-            d["via"] = path_kind(*via.get(n["num"], (0, 0)))
+            p = paths.get(n["num"]) or {"kind": "unknown", "label": "Not logged yet", "why": "Nothing logged yet"}
+            d["via"], d["via_label"], d["via_why"] = p["kind"], p["label"], p["why"]
             out.append(d)
         return {"nodes": out}
 

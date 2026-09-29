@@ -295,7 +295,7 @@ def test_read_token_can_read_but_not_send(api, store):
     status, body = call("GET", "/api/messages?since=1h", token=token)
     assert status == 200 and body["messages"][0]["text"] == "hello"
     nodes = call("GET", "/api/nodes", token=token)[1]["nodes"]
-    assert [(n["num"], n["via"], n["last_snr"]) for n in nodes] == [(BOB, "radio", 5.0)]
+    assert [(n["num"], n["via"], n["last_snr"]) for n in nodes] == [(BOB, "direct", 5.0)]
     packet = call("GET", f"/api/packets?node=!{BOB:08x}&type=TEXT_MESSAGE_APP", token=token)[1]["packets"][0]
     assert packet["packet"]["decoded"]["text"] == "hello"  # the full packet, parsed
     before = len(iface.sent)

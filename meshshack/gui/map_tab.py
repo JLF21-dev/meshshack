@@ -12,7 +12,6 @@ from PySide6.QtWidgets import QCheckBox, QComboBox, QHBoxLayout, QLabel, QPushBu
 
 from .. import __version__
 from ..coverage import report as coverage_report
-from ..store import path_kind
 from .common import WINDOWS, cell_size_text, distance_km, effective_precision, fmt_ago, precision_cell, since_for, station_position
 
 MAP_HTML = Path(__file__).parent / "assets" / "map.html"
@@ -130,7 +129,7 @@ class MapTab(QWidget):
         my_num = self.win.my_num
         my_lat, my_lon, my_bits = station_position(self.win.status, self.store, my_num)
 
-        heard_via = self.store.heard_via()
+        paths = self.win.paths()
         reported_bits = self.store.position_precision()
         nodes = []
         for n in self.store.nodes():
@@ -140,10 +139,11 @@ class MapTab(QWidget):
                 continue
             if not is_me and since is not None and (n["last_heard"] or 0) < since:
                 continue
-            rf, mqtt = heard_via.get(n["num"], (0, 0))
+            p = paths.get(n["num"]) or {"kind": "unknown", "label": "Not logged yet", "why": "Only in the radio's "
+                                        "saved node list: nothing from it has been logged yet"}
             bits = my_bits if is_me else effective_precision(lat, lon, reported_bits.get(n["num"]))
             nodes.append({
-                "path": path_kind(rf, mqtt), "rf_packets": rf, "mqtt_packets": mqtt,
+                "path": p["kind"], "path_label": p["label"], "path_why": p["why"],
                 "cell": precision_cell(lat, lon, bits),
                 "accuracy": f"Approximate: somewhere in a {cell_size_text(lat, bits)} area" if bits else "Exact",
                 "approx_distance": bool(bits or my_bits),
@@ -151,7 +151,7 @@ class MapTab(QWidget):
                 "hw_model": n["hw_model"], "role": n["role"], "lat": lat, "lon": lon, "is_me": is_me,
                 "age_s": time.time() - n["last_heard"] if n["last_heard"] else None,
                 "age_text": fmt_ago(n["last_heard"]), "snr": n["last_snr"], "rssi": n["last_rssi"],
-                "hops": None if path_kind(rf, mqtt) == "mqtt" else n["hops_away"], "battery": n["battery_level"],
+                "hops": None if p["kind"] in ("mqtt", "inferred") else n["hops_away"], "battery": n["battery_level"],
                 "distance_km": None if is_me else distance_km(my_lat, my_lon, lat, lon),
             })
         self.count.setText(f"{len(nodes)} node{'s' if len(nodes) != 1 else ''} with a position")

@@ -161,9 +161,20 @@ crash's stack trace goes to `gui-crash.log` beside it.
   exact fixed position you set, not the rounded one it broadcasts.
   Optional position trails. Click a node to message it, traceroute it, or
   request its position.
-- **Nodes:** sortable table: last heard, how it's heard (radio, internet,
-  or both), direct SNR/RSSI, hops, battery, and distance from you (≈ when a
-  position is rounded). SNR and RSSI only come from packets heard straight
+- **Nodes:** sortable table: last heard, how it's heard, direct SNR/RSSI,
+  hops, battery, and distance from you (≈ when a position is rounded).
+  **Via** marks every node as **Direct**, **Radio · N hops**, **Internet**
+  (flagged MQTT), **Internet?** (inferred), **Radio + internet**, or
+  **Unknown** (older firmware sends no hop count); hover it for the reason.
+  "Internet?" matters because not every gateway flags the internet traffic
+  it re-transmits, so it can look like radio. A node farther away than its
+  hop count can carry (more than 100 km for one link, or more than 50 km a
+  hop on average across a chain, measured to the nearest point of a rounded
+  position) is marked as probably internet. It's never stated as certain:
+  tall sites and aircraft beat those limits, and a node can report a wrong
+  position. The same marking is used on the map (a dashed square), in node
+  details, on chat messages, in Coverage and in the API. "Hide
+  internet-only" leaves just the nodes you reach by radio. SNR and RSSI only come from packets heard straight
   from the node; a relayed packet's signal belongs to the last relay, and an
   MQTT packet's to the gateway, so those are left blank. Actions: message,
   traceroute, request position, telemetry or node info, and **★ Favorite**

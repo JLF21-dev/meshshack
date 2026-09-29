@@ -113,7 +113,22 @@ def report(store, station, preset, since=0):
     heard = totals["heard"] or 1
     sources = [{"kind": "direct", "label": "Heard directly", "packets": totals["direct"]}]
     direct_nums = set(data["direct"])
-    for byte, count in sorted(data["relays"].items(), key=lambda kv: -kv[1]):
+    # Split each relay's traffic: genuinely relayed over radio, or internet traffic it re-transmits
+    # without the MQTT flag (the sender is too far away for its hop count; see paths.py).
+    from .paths import nearest_km, packet_path
+    near = {}
+    if lat0 is not None:
+        for num, n in nodes.items():
+            if n["latitude"] is not None:
+                bits = effective_precision(n["latitude"], n["longitude"], bits_reported.get(num))
+                near[num] = nearest_km(lat0, lon0, n["latitude"], n["longitude"], bits)
+    radio_by_relay, internet_by_relay = {}, {}
+    for r in store.relayed_by(since):
+        byte = int(r["relay"])
+        target = internet_by_relay if packet_path(near.get(r["from_num"]), r["hops"], False) == "inferred" else radio_by_relay
+        target[byte] = target.get(byte, 0) + r["c"]
+    totals["inferred"] = sum(internet_by_relay.values())
+    for byte, count in sorted(radio_by_relay.items(), key=lambda kv: -kv[1]):
         byte = int(byte)
         cands = relay_candidates(byte, direct_nums, nodes)
         names = [(nodes[c]["short_name"] if c in nodes and nodes[c]["short_name"] else f"!{c:08x}") for c in cands]
@@ -123,7 +138,12 @@ def report(store, station, preset, since=0):
                         "label": (f"Via {names[0]}" if len(names) == 1 else
                                   f"Via {' or '.join(names)}" if names else "Via an unknown relay")
                         + ("" if sure or not names else "?") + f" (ID ends 0x{byte:02x})"})
-    sources.append({"kind": "mqtt", "label": "Via the internet (MQTT)", "packets": totals["mqtt"]})
+    for byte, count in sorted(internet_by_relay.items(), key=lambda kv: -kv[1]):
+        cands = relay_candidates(byte, direct_nums, nodes)
+        name = (nodes[cands[0]]["short_name"] or f"!{cands[0]:08x}") if len(cands) == 1 else f"ID ends 0x{byte:02x}"
+        sources.append({"kind": "inferred", "byte": byte, "candidates": cands, "packets": count,
+                        "label": f"Internet traffic re-sent by {name}, not flagged (inferred from distance)"})
+    sources.append({"kind": "mqtt", "label": "Via the internet (MQTT, flagged)", "packets": totals["mqtt"]})
     sources.append({"kind": "unknown", "label": "Path unknown (older firmware)", "packets": totals["unknown_path"]})
     for s in sources:
         s["share"] = s["packets"] / heard

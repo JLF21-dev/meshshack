@@ -1032,6 +1032,18 @@ class Store:
         totals["direct"] = sum(len(d["snrs"]) for d in direct.values())
         return {"direct": direct, "relays": relays, "totals": totals}
 
+    def relayed_by(self, since=0):
+        """Relayed over-the-air packets by (relay byte, sender, hops taken), for telling a relay's
+        radio traffic apart from internet traffic it re-transmits (see paths.py)."""
+        return self._query(
+            """SELECT json_extract(json, '$.relayNode') AS relay, from_num, hop_start - hop_limit AS hops,
+                      COUNT(*) AS c FROM packets
+               WHERE logged_at >= ? AND is_local = 0 AND COALESCE(via_mqtt, 0) = 0
+                 AND hop_start IS NOT NULL AND hop_start > hop_limit AND json_extract(json, '$.relayNode') IS NOT NULL
+               GROUP BY relay, from_num, hops""",
+            (since,),
+        )
+
     def coverage_over_time(self, since, bucket):
         """Per time bucket (seconds wide, starting at `since`): packets heard, packets heard
         directly, distinct direct neighbors, and packets per relay byte. For "did moving the

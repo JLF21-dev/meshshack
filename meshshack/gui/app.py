@@ -180,6 +180,21 @@ class MainWindow(QMainWindow):
         warning = (result or {}).get("warning")
         self.toast(f"{done_text}. Note: {warning}" if warning else done_text, 10000 if warning else 6000)
 
+    def paths(self):
+        """Each node's path (direct / radio / internet, see paths.py), recomputed at most every 30 s."""
+        import time as _time
+        from ..paths import summarize
+        from .common import station_position
+
+        cached = getattr(self, "_paths", None)
+        if cached is None or _time.time() - cached[0] > 30:
+            station = station_position(self.status, self.store, self.my_num)
+            if station[0] is None:
+                from ..coverage import station_from_store
+                station = station_from_store(self.store)
+            self._paths = (_time.time(), summarize(self.store, station))
+        return self._paths[1]
+
     @property
     def my_num(self):
         return (self.status.get("node") or {}).get("num")

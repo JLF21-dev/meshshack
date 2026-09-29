@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..api import MAX_TEXT_BYTES
+from ..paths import packet_path
 from .common import fmt_ago, fmt_clock, fmt_day, node_name
 
 # Offered by React; any single emoji can also arrive from other apps.
@@ -293,6 +294,7 @@ class ChatTab(QWidget):
             return text if len(text) <= limit else text[: limit - 1] + "…"
 
         link = f"style='color:{meta_color}; text-decoration:none'"
+        paths = self.win.paths()
         parts = []
         last_day = None
         for m in rows:
@@ -333,6 +335,10 @@ class ChatTab(QWidget):
             elif m["via_mqtt"]:
                 # The signal is the MQTT gateway's retransmission, so it says nothing about the sender.
                 meta.append("via internet (MQTT)")
+            elif m["hops"] is not None and packet_path((paths.get(m["from_num"]) or {}).get("near_km"), m["hops"],
+                                                       False) == "inferred":
+                meta.append(f"probably via internet: too far for {m['hops']} hop{'s' if m['hops'] != 1 else ''} "
+                            "(no MQTT flag)")
             else:
                 signal = []
                 if m["rx_snr"] is not None:

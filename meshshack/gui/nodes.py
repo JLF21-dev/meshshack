@@ -13,7 +13,6 @@ from PySide6.QtWidgets import (
 )
 
 from ..export import EXPORTS
-from ..store import path_kind
 from .charts import NodeCharts
 from .common import (
     WINDOWS, cell_size_text, distance_km, effective_precision, fmt_ago, since_for, station_position,
@@ -23,16 +22,15 @@ COLUMNS = ["Short", "Long name", "ID", "Hardware", "Role", "Last heard", "Via", 
            "Battery", "Distance"]
 HEADER_TIPS = {
     "Last heard": "Last packet from this node by any path, including the internet (MQTT)",
-    "Via": "How this node's packets reach you: over the radio, through the internet (MQTT), or both",
+    "Via": "How this node's packets reach you: Direct, Radio (with the fewest hops), Internet (flagged MQTT), "
+           "Internet? (not flagged, but farther away than radio carries in its hop count), both, or Unknown (older "
+           "firmware without hop information). Hover a cell for the reason.",
     "Direct SNR": "Signal from the last packet heard straight from this node (0 hops). Blank if you've only "
                   "heard it through relays: a relayed packet's signal belongs to the last relay, not the node.",
     "Direct RSSI": "Signal strength of the last packet heard straight from this node (0 hops)",
     "Hops": "Hops taken by the last packet heard over the radio (MQTT packets don't count)",
     "Distance": "≈ means at least one of the two positions is rounded (see the map's position areas)",
 }
-VIA_TEXT = {"radio": "Radio", "mqtt": "Internet", "both": "Both", "unknown": ""}
-VIA_LONG = {"radio": "over the radio", "mqtt": "through the internet (MQTT) only",
-            "both": "over the radio and through the internet (MQTT)", "unknown": "not logged yet (only in the radio's node list)"}
 FAVORITE_TIP = ("Favorites are stored on your radio. With the CLIENT_BASE role, your radio gives their traffic "
                 "router priority. Nothing is transmitted.")
 ACTIONS = [
@@ -96,6 +94,12 @@ class NodesTab(QWidget):
         top.addWidget(QLabel("Heard:"))
         top.addWidget(self.window_box)
         top.addWidget(self.search, 1)
+        self.radio_only = QCheckBox("Hide internet-only")
+        self.radio_only.setToolTip("Hide nodes heard only through the internet (flagged MQTT, or too far for their hops)")
+        self.radio_only.setChecked(win.settings.value("nodes/radio_only", "false") == "true")
+        self.radio_only.toggled.connect(lambda on: (win.settings.setValue("nodes/radio_only", "true" if on else "false"),
+                                                    self.refresh()))
+        top.addWidget(self.radio_only)
         self.favorites_first = QCheckBox("★ Favorites first")
         self.favorites_first.setChecked(win.settings.value("nodes/favorites_first", "true") == "true")
         self.favorites_first.toggled.connect(self._favorites_first_changed)
@@ -193,9 +197,11 @@ class NodesTab(QWidget):
         my_num = self.win.my_num
         my_lat, my_lon, my_bits = station_position(self.win.status, self.store, my_num)
         reported_bits = self.store.position_precision()
-        heard_via = self.store.heard_via()
+        paths = self.win.paths()
 
         nodes = [n for n in self.store.nodes(since=since) if n["num"] != my_num]
+        if self.radio_only.isChecked():
+            nodes = [n for n in nodes if (paths.get(n["num"]) or {}).get("kind") not in ("mqtt", "inferred")]
         if needle:
             nodes = [n for n in nodes
                      if needle in " ".join(str(n[k] or "") for k in ("short_name", "long_name", "node_id", "hw_model")).lower()]
@@ -208,8 +214,9 @@ class NodesTab(QWidget):
         self.table.setRowCount(len(nodes))
         for row, n in enumerate(nodes):
             dist = distance_km(my_lat, my_lon, n["latitude"], n["longitude"])
-            via = path_kind(*heard_via.get(n["num"], (0, 0)))
-            hops = None if via == "mqtt" else n["hops_away"]  # meaningless across the internet
+            p = paths.get(n["num"]) or {"kind": "unknown", "label": "", "why": "Nothing from it logged yet"}
+            via = p["kind"]
+            hops = None if via in ("mqtt", "inferred") else n["hops_away"]  # meaningless across the internet
             # ≈ when either end is a rounded position (see common.effective_precision).
             approx = my_bits or effective_precision(n["latitude"], n["longitude"], reported_bits.get(n["num"]))
             favorite = bool(n["is_favorite"])
@@ -220,7 +227,7 @@ class NodesTab(QWidget):
                 SortItem(n["hw_model"] or "", n["hw_model"]),
                 SortItem(n["role"] or "", n["role"]),
                 SortItem(fmt_ago(n["last_heard"]), n["last_heard"]),
-                SortItem(VIA_TEXT[via], via if via != "unknown" else None),
+                SortItem(p["label"], via if p["label"] else None),
                 SortItem(f"{n['last_snr']:.1f}" if n["last_snr"] is not None else "", n["last_snr"]),
                 SortItem(str(n["last_rssi"]) if n["last_rssi"] is not None else "", n["last_rssi"]),
                 SortItem(str(hops) if hops is not None else "", hops),
@@ -228,6 +235,7 @@ class NodesTab(QWidget):
                 SortItem(f"{'≈ ' if approx else ''}{dist:.1f} km" if dist is not None else "", dist),
             ]
             cells[0].setData(Qt.UserRole, n["num"])
+            cells[COLUMNS.index("Via")].setToolTip(p["why"])
             for item in cells:
                 item.favorite, item.state = favorite, self.sort_state
                 if n["is_ignored"]:
@@ -338,8 +346,9 @@ class NodesTab(QWidget):
         if n is None:
             return
         summary = self.store.node_summary(num)
-        rf, mqtt = self.store.heard_via().get(num, (0, 0))
-        via = path_kind(rf, mqtt)
+        p = self.win.paths().get(num) or {"kind": "unknown", "label": "Not logged yet", "why": "Nothing from it logged yet",
+                                         "direct": 0, "radio": 0, "mqtt": 0, "inferred": 0, "unknown": 0}
+        via = p["kind"]
         my_lat, my_lon, my_bits = station_position(self.win.status, self.store, self.win.my_num)
         bits = effective_precision(n["latitude"], n["longitude"], self.store.position_precision().get(num))
 
@@ -349,7 +358,9 @@ class NodesTab(QWidget):
         rows = [
             ("Node", f"{n['long_name'] or ''} ({n['short_name'] or '?'}) · {n['node_id']}"),
             ("Hardware / role", f"{n['hw_model'] or '?'} · {n['role'] or '?'}"),
-            ("Heard", f"{VIA_LONG[via]}: {rf} packet{'s' if rf != 1 else ''} over the radio, {mqtt} via MQTT"),
+            ("Heard", f"{p['label']}. {p['why']}"),
+            ("Packets by path", f"{p['direct']} direct, {p['radio']} relayed over radio, {p['mqtt']} internet (flagged), "
+                                f"{p['inferred']} internet (inferred), {p['unknown']} unknown"),
             ("First seen", when(n["first_seen"])),
             ("Last heard", f"{when(n['last_heard'])}; over the radio {when(n['rf_heard'])}; "
                            f"directly {when(n['direct_heard'])}"),
@@ -357,7 +368,7 @@ class NodesTab(QWidget):
         if n["last_snr"] is not None:
             rows.append(("Direct signal", f"SNR {n['last_snr']:.1f} dB, RSSI {n['last_rssi']} "
                                           f"(heard directly {fmt_ago(n['direct_heard'])})"))
-        if via != "mqtt" and n["hops_away"] is not None:
+        if via not in ("mqtt", "inferred") and n["hops_away"] is not None:
             rows.append(("Hops away", str(n["hops_away"])))
         if n["battery_level"] is not None:
             battery = "external power" if n["battery_level"] > 100 else f"{n['battery_level']}%"

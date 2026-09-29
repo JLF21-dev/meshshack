@@ -73,7 +73,7 @@ def test_report(store):
     assert by_kind[("relay", 0x90)]["candidates"] == [NEAR] and by_kind[("relay", 0x90)]["certain"]
     assert by_kind[("relay", 0x90)]["label"] == "Via NEAR (ID ends 0x90)"
     assert by_kind[("relay", 0xC0)]["label"] == "Via an unknown relay (ID ends 0xc0)"
-    assert rep["totals"] == {"heard": 12, "direct": 3, "relayed": 7, "mqtt": 1, "unknown_path": 1}
+    assert rep["totals"] == {"heard": 12, "direct": 3, "relayed": 7, "mqtt": 1, "unknown_path": 1, "inferred": 0}
     assert sum(s["share"] for s in rep["sources"]) == pytest.approx(1.0)  # every packet is accounted for
 
     # No station position: distances are unknown, the rest still works.

@@ -45,10 +45,11 @@ legend.onAdd = () => {
     row('circle', '#9e9e9e', 'Older') +
     '<b>Heard via</b>' +
     row('me', '#1a73e8', 'This station') +
-    row('circle', '#fff', 'Radio') +
-    row('square', '#fff', 'Internet (MQTT)') +
+    row('circle', '#fff', 'Radio (direct or relayed)') +
+    row('square', '#fff', 'Internet (flagged MQTT)') +
+    row('square_q', '#fff', 'Internet? (too far for its hops)') +
     row('triangle', '#fff', 'Both radio and internet') +
-    row('diamond', '#fff', 'Not logged yet (radio\'s saved list)') +
+    row('diamond', '#fff', 'Not logged yet, or path unknown') +
     '<svg width="12" height="12" viewBox="0 0 12 12"><line x1="0" y1="6" x2="12" y2="6" stroke="#2a78d6" stroke-width="2"/></svg>' +
     'Direct link (when shown)<br>' +
     '<b>Position</b>' +
@@ -66,8 +67,9 @@ function color(node) {
   return '#9e9e9e';
 }
 
-// Shape = how the node's traffic reaches us (see map_tab.path_kind); color = how recently.
-const SHAPE_FOR_PATH = { radio: 'circle', mqtt: 'square', both: 'triangle', unknown: 'diamond' };
+// Shape = how the node's traffic reaches us (see paths.py); color = how recently.
+const SHAPE_FOR_PATH = { direct: 'circle', radio: 'circle', mqtt: 'square', inferred: 'square_q', both: 'triangle',
+                         unknown: 'diamond' };
 
 function starPoints(cx, cy, outer, inner) {
   const pts = [];
@@ -83,6 +85,7 @@ function shapeSvg(shape, fill, size, stroke = '#fff', strokeWidth = 2) {
   const body = {
     circle: '<circle cx="10" cy="10" r="7"/>',
     square: '<rect x="3.5" y="3.5" width="13" height="13" rx="1.5"/>',
+    square_q: '<rect x="3.5" y="3.5" width="13" height="13" rx="1.5" stroke-dasharray="3 2"/>',
     triangle: '<polygon points="10,2.5 18,16.5 2,16.5" stroke-linejoin="round"/>',
     diamond: '<polygon points="10,1.5 18,10 10,18.5 2,10" stroke-linejoin="round"/>',
     me: `<polygon points="${starPoints(10, 10.5, 9, 4)}" stroke-linejoin="round"/>`,
@@ -137,12 +140,7 @@ function fanOffsets(nodes) {
 }
 
 function heardViaText(n) {
-  const rf = n.rf_packets, mqtt = n.mqtt_packets;
-  const pk = k => k + (k === 1 ? ' packet' : ' packets');
-  if (rf && mqtt) return `Radio ${pk(rf)}, internet ${pk(mqtt)}`;
-  if (mqtt) return `Internet (MQTT), ${pk(mqtt)}`;
-  if (rf) return `Radio, ${pk(rf)}`;
-  return 'Nothing logged yet';
+  return n.path_label + ': ' + n.path_why;
 }
 
 function esc(s) {
