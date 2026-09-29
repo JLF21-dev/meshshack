@@ -149,6 +149,32 @@ CREATE TABLE IF NOT EXISTS alerts (
 );
 CREATE INDEX IF NOT EXISTS alerts_open ON alerts (acknowledged_at, loud);
 
+-- Automation jobs (see automation.py) and every run: sent, dry run, skipped (and why), missed.
+CREATE TABLE IF NOT EXISTS automation_jobs (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    name         TEXT NOT NULL UNIQUE,
+    enabled      INTEGER NOT NULL DEFAULT 1,
+    dry_run      INTEGER NOT NULL DEFAULT 1,     -- new jobs only record what they would send
+    trigger      TEXT NOT NULL,                  -- JSON: {"type": "daily"|"weekly"|"every", ...}
+    destination  TEXT NOT NULL,                  -- JSON: {"channel": n} or {"to": node num}
+    template     TEXT NOT NULL,
+    sources      TEXT NOT NULL DEFAULT '[]',     -- JSON: HTTP/command sources
+    created_at   REAL NOT NULL,
+    updated_at   REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS automation_runs (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id     INTEGER NOT NULL,
+    job_name   TEXT,
+    slot       REAL NOT NULL,          -- the scheduled time this run was for
+    at         REAL NOT NULL,
+    status     TEXT NOT NULL,          -- sent, dry run, skipped, missed
+    text       TEXT,
+    detail     TEXT,
+    packet_id  INTEGER
+);
+CREATE INDEX IF NOT EXISTS automation_runs_job ON automation_runs (job_id, slot);
+
 -- Small facts about this station that the radio doesn't hand back, e.g. the exact fixed
 -- position (the radio only reports it rounded to the channel's position precision).
 CREATE TABLE IF NOT EXISTS station (
@@ -583,6 +609,64 @@ class Store:
                     "UPDATE alerts SET acknowledged_at = ? WHERE id = ? AND acknowledged_at IS NULL",
                     [(now or time.time(), i) for i in ids])
             return cur.rowcount
+
+    # ---- automation ----
+
+    @staticmethod
+    def _job(row):
+        job = dict(row)
+        for key in ("trigger", "destination", "sources"):
+            job[key] = json.loads(job[key])
+        job["enabled"], job["dry_run"] = bool(job["enabled"]), bool(job["dry_run"])
+        return job
+
+    def automation_jobs(self):
+        return [self._job(r) for r in self._query("SELECT * FROM automation_jobs ORDER BY id")]
+
+    def automation_job(self, job_id):
+        rows = self._query("SELECT * FROM automation_jobs WHERE id = ?", (job_id,))
+        return self._job(rows[0]) if rows else None
+
+    def save_automation_job(self, job, now=None):
+        """Insert (no id) or update a job; returns its id. New jobs start in dry-run mode."""
+        now = now or time.time()
+        values = (job["name"], int(job.get("enabled", True)), int(job.get("dry_run", True)),
+                  json.dumps(job["trigger"]), json.dumps(job["destination"]), job["template"],
+                  json.dumps(job.get("sources") or []))
+        with self._lock, self._conn:
+            try:
+                if job.get("id") is None:
+                    return self._conn.execute(
+                        """INSERT INTO automation_jobs (name, enabled, dry_run, trigger, destination, template, sources,
+                               created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""", (*values, now, now)).lastrowid
+                self._conn.execute(
+                    """UPDATE automation_jobs SET name = ?, enabled = ?, dry_run = ?, trigger = ?, destination = ?,
+                           template = ?, sources = ?, updated_at = ? WHERE id = ?""", (*values, now, job["id"]))
+                return job["id"]
+            except sqlite3.IntegrityError:
+                raise ValueError(f"there's already a job named {job['name']!r}")
+
+    def delete_automation_job(self, job_id):
+        with self._lock, self._conn:
+            return self._conn.execute("DELETE FROM automation_jobs WHERE id = ?", (job_id,)).rowcount > 0
+
+    def automation_ran(self, job_id, slot):
+        return bool(self._query("SELECT 1 FROM automation_runs WHERE job_id = ? AND slot = ?", (job_id, slot)))
+
+    def record_automation_run(self, job_id, slot, status, text, detail, packet_id=None, now=None):
+        job = self.automation_job(job_id)
+        with self._lock, self._conn:
+            self._conn.execute(
+                """INSERT INTO automation_runs (job_id, job_name, slot, at, status, text, detail, packet_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (job_id, job["name"] if job else None, slot, now or time.time(), status, text, detail, packet_id),
+            )
+        return {"status": status, "text": text, "detail": detail}
+
+    def automation_runs(self, limit=100, job_id=None):
+        if job_id is None:
+            return self._query("SELECT * FROM automation_runs ORDER BY id DESC LIMIT ?", (limit,))
+        return self._query("SELECT * FROM automation_runs WHERE job_id = ? ORDER BY id DESC LIMIT ?", (job_id, limit))
 
     def mark_local(self, my_num):
         """Tag this station's own packets, including ones logged before local tagging existed."""

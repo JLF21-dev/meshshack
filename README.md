@@ -28,6 +28,9 @@ a kill switch.
 - **Emergency alerts:** SOS, MAYDAY and other keywords, Meshtastic alert
   messages and the alert bell raise a banner, an alarm and a notification
   (detected by the logger, even while the app is closed). Nothing is sent.
+- **Automation:** your own scheduled messages (e.g. a weekly NIST time check
+  or a daily weather report), filled in from data sources and HTTP/JSON
+  APIs, strictly rate-limited, and dry runs until you go live.
 - **Export:** nodes (CSV/KML), messages and telemetry (CSV), position history (GPX).
 
 Status: 0.1, in daily use on a Heltec V4 (firmware 2.7) on Linux. Plans and the
@@ -91,6 +94,7 @@ appears, try another USB cable, since many are power-only.
 .venv/bin/meshshack events                  # connect/disconnect history
 .venv/bin/meshshack coverage --since 7d  # direct neighbors and where traffic comes from
 .venv/bin/meshshack alerts               # open emergency alerts (--all for history; ack ID|all)
+.venv/bin/meshshack automation           # scheduled message jobs and recent runs
 .venv/bin/meshshack export nodes -f kml -o nodes.kml          # also csv
 .venv/bin/meshshack export positions --since 7d -o tracks.gpx
 .venv/bin/meshshack export messages -o messages.csv           # telemetry too
@@ -212,6 +216,32 @@ crash's stack trace goes to `gui-crash.log` beside it.
   them on. **Test alert** checks the banner and sound. MeshShack never
   sends anything in response. `meshshack alerts` lists them
   (`meshshack alerts ack all`).
+- **Automation:** messages you define, sent on a schedule (daily, weekly,
+  or every N hours, at least 6), with content filled in when they run. The
+  logger runs them, so they work with the app closed.
+  - **Templates** with placeholders: `{time}`, `{date}`, `{time_utc}`;
+    `{clock.offset_ms:+.0f}` (this computer's clock checked against NIST's
+    time servers); station stats like `{station.nodes_heard_7d}` or
+    `{station.channel_util:.0f}`; node values like `{node.CMP.battery}`;
+    `{weather.short}`, `{weather.temp}` and friends from the US National
+    Weather Service for your station's area (your position is rounded to
+    about 1 km before it's sent); fields from **any HTTP/JSON API** you add
+    as a data source (`{aq.pm25}` for a field picked by path such as
+    `current.pm25`); and, if you allow it, a local command's output.
+  - **Presets:** weekly NIST time check, daily weather, weekly mesh stats.
+  - **Preview** fills a message in with live data and shows its length,
+    without sending.
+  - **Safety:** new jobs are **dry runs** that record what they would have
+    sent; **Go live** asks first. Every send goes through the gatekeeper
+    (each job at most every 6 hours, 4 automated sends a day in total, 30 s
+    apart, paused above 20% channel utilization, never with transmitting
+    off). Runs start a few random minutes after their time so bots don't
+    all fire at once. A message over 200 bytes, or with data that couldn't
+    be fetched, is skipped, never truncated or sent half-filled; a run the
+    logger missed isn't sent late; nothing is retried. The run log says what
+    was sent, dry-run, skipped or missed, and why. Nothing replies to
+    incoming messages.
+  `meshshack automation` lists jobs and runs.
 - **Channels:** your radio's channels, with encryption (default public key,
   private AES-128/256 key, or none) and position sharing. Add a private
   channel with a fresh random key, edit a secondary channel, delete one, or
@@ -321,6 +351,7 @@ airtime gatekeeper with its own budget (see [Airtime](#airtime)).
 | `POST /api/announce` | send | Broadcast this node's info (needs broadcast permission) |
 | `POST /api/tx`, `/api/reboot`, `/api/config/*` | app only | Kill switch, reboot, owner/role/position |
 | `POST /api/alerts/ack` `{ids \| all}` | app only | Acknowledge alerts |
+| `GET /api/automation`, `POST /api/automation/{save,preview,delete,settings}` | app only | Automation jobs |
 
 `since` takes a unix time or a duration like `30m`, `24h`, `7d`; `limit`
 caps rows (at most 1000). Nodes can be given as `!a1b2c3d4` or a number.

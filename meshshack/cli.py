@@ -76,20 +76,25 @@ def cmd_run(args, store):
     bus = EventBus()
     collector = Collector(store, port=args.port, retry_seconds=args.retry, bus=bus)
 
+    from .api import ApiServer, Radio
+    from .automation import Automation
+
+    radio = Radio(collector, store)  # the one path to the radio, through the airtime gatekeeper
     api = None
     if args.api_port:
-        from .api import ApiServer, Radio
-
         try:
-            api = ApiServer(Radio(collector, store), args.db.parent / "hub.json", port=args.api_port, bus=bus)
+            api = ApiServer(radio, args.db.parent / "hub.json", port=args.api_port, bus=bus)
             api.start()
         except OSError as ex:
             # Keep logging even if the port is taken; the GUI just can't send.
             log.error("API not started on port %s: %s", args.api_port, ex)
             api = None
+    automation = Automation(store, radio)
+    automation.start()
     try:
         collector.run(stop)
     finally:
+        automation.stop()
         if api:
             api.stop()
         store.record_event("stopped")
@@ -292,6 +297,25 @@ def cmd_alerts(args, store):
     )
 
 
+def cmd_automation(args, store):
+    from .automation import describe_trigger
+
+    jobs = store.automation_jobs()
+    if not jobs:
+        print("No automation jobs. Create them in the app's Automation tab.")
+    else:
+        print_table(["id", "job", "schedule", "sends to", "mode"],
+                    [[j["id"], j["name"], describe_trigger(j["trigger"]),
+                      f"!{j['destination']['to']:08x}" if "to" in j["destination"] else f"ch{j['destination']['channel']}",
+                      "off" if not j["enabled"] else "dry run" if j["dry_run"] else "LIVE"] for j in jobs])
+    runs = list(reversed(store.automation_runs(limit=args.limit)))
+    if runs:
+        print()
+        print_table(["time", "job", "result", "message, or why not"],
+                    [[fmt_time(r["at"]), r["job_name"], r["status"],
+                      r["text"] if r["status"] in ("sent", "dry run") else r["detail"]] for r in runs])
+
+
 def build_parser():
     parser = argparse.ArgumentParser(prog="meshshack", description="MeshShack: log, monitor, and control a Meshtastic radio.")
     parser.add_argument("--db", type=Path, default=DEFAULT_DB, help=f"database path (default: {DEFAULT_DB})")
@@ -369,6 +393,10 @@ def build_parser():
     p.add_argument("--all", action="store_true", help="include acknowledged alerts")
     p.add_argument("-n", "--limit", type=int, default=50)
     p.set_defaults(func=cmd_alerts)
+
+    p = sub.add_parser("automation", help="scheduled message jobs and their recent runs")
+    p.add_argument("-n", "--limit", type=int, default=20)
+    p.set_defaults(func=cmd_automation)
 
     p = sub.add_parser("stats", help="packet counts by type")
     p.add_argument("--since", type=parse_since, help=since_help)

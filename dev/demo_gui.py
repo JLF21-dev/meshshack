@@ -100,6 +100,19 @@ sos = {"from": 0x33333333, "to": BROADCAST_NUM, "id": 43000, "channel": 0, "rxSn
        "hopLimit": 2, "decoded": {"portnum": "TEXT_MESSAGE_APP", "text": "SOS - rolled my ankle at the trailhead, need a ride"}}
 alerts.check(store, sos, store.record_packet(sos, now=now - 120), now=now - 120)
 
+# Two automation jobs and their recent runs (the demo doesn't run the scheduler).
+from meshshack.automation import PRESETS
+nist = store.save_automation_job({**PRESETS["Weekly NIST time check"], "name": "Weekly NIST time check",
+                                  "destination": {"channel": 0}}, now=now - 30 * 86400)
+wx = store.save_automation_job({**PRESETS["Daily weather"], "name": "Daily weather", "destination": {"channel": 0},
+                                "dry_run": False}, now=now - 30 * 86400)
+store.record_automation_run(nist, now - 2 * 86400, "dry run", "NIST time check 2026-09-27 17:03 UTC: this station's "
+                            "clock is +1 ms off. Check yours!", "dry run: nothing sent", now=now - 2 * 86400)
+store.record_automation_run(wx, now - 86400, "sent", "Weather Today: Sunny, 71°F, wind 5 mph SW. (NWS)", None,
+                            now=now - 86400 + 240)
+store.record_automation_run(wx, now - 3600, "skipped", None, "Paused: the channel is busy (24% utilization, limit 20%)",
+                            now=now - 3600 + 300)
+
 iface = FakeInterface()
 iface.localNode.localConfig.device.role = 12  # CLIENT_BASE
 iface.localNode.localConfig.position.position_broadcast_secs = 900
@@ -120,10 +133,14 @@ steps = []
 def shot(name):
     win.grab().save(str(out / f"gui_{name}.png")); print("saved", name)
 def seq(i=0):
-    plan = [(0, "chat"), (1, "map"), (2, "nodes"), (3, "coverage"), (4, "channels"), (5, "alerts"), (6, "device")]
+    plan = [(0, "chat"), (1, "map"), (2, "nodes"), (3, "coverage"), (4, "channels"), (5, "alerts"), (6, "automation"), (7, "device")]
     if i < len(plan):
         idx, name = plan[i]
         win.tabs.setCurrentIndex(idx)
+        # The demo SOS is open only for the chat and alerts shots, so the banner isn't on every screenshot.
+        store._conn.execute("UPDATE alerts SET acknowledged_at = ?", (None if name in ("chat", "alerts") else now,))
+        store._conn.commit()
+        win.alert_center.check()
         if name == "nodes":  # show the solar router's details and charts
             for r in range(win.nodes.table.rowCount()):
                 if win.nodes.table.item(r, 0).data(0x0100) == 0x11111111:

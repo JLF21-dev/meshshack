@@ -20,7 +20,7 @@ transmission goes through one airtime gatekeeper, with a kill switch.
    login, and the logger as an always-on service
    - [ ] Remote admin of own nodes: design agreed, on hold until the solar
      repeater node is built (then build and test against it)
-5. [ ] Automation: scheduled/triggered informational messages (weekly time,
+5. [x] Automation: scheduled/triggered informational messages (weekly time,
    daily weather), plus emergency detection with loud local alerts; each job
    opt-in, previewed as a dry run first, with a hard minimum interval.
    Messages are user-defined; their content can come from data sources and
@@ -62,18 +62,16 @@ Picked up when work resumes. The ground rule above applies to every item.
 The goal: define your own automated messages in the app, with content filled
 in at send time from data sources, including external APIs. Proposed shape:
 
-- [ ] **Jobs** you create in an Automation tab: a name; a trigger; a
+- [x] **Jobs** you create in an Automation tab: a name; a trigger; a
   destination (a channel or a direct message); a message template; and on/off.
   Each new job starts in dry-run mode.
-- [ ] **Triggers:** a schedule (e.g. weekly on a day and time, daily at a
-  time, or every N hours, never under 6 h) or an event (e.g. an emergency
-  keyword, a favorite node going quiet or coming back, the channel staying
-  busy). Scheduled sends get a few minutes of random jitter.
-- [ ] **Templates** with placeholders, e.g. `{time}`, `{date}`,
-  `{station.channel_util}`, `{node:CMP.battery}`, `{weather.temp}`. There's a
+- [x] **Schedules:** weekly on a day and time, daily at a time, or every N
+  hours (never under 6 h), with a few minutes of random jitter per run.
+- [x] **Templates** with placeholders, e.g. `{time}`, `{date}`,
+  `{station.channel_util}`, `{node.CMP.battery}`, `{weather.temp}`. There's a
   live preview that renders the real text and its byte count against the
   200-byte limit; a message that renders too long is refused, not truncated.
-- [ ] **Data sources** that fill placeholders:
+- [x] **Data sources** that fill placeholders:
   - built-in: local time and a NIST/NTP clock-offset check, this station's
     telemetry, mesh stats from the log (nodes heard, busiest hour, …);
   - HTTP/JSON APIs: a URL, fields picked by path (e.g. the National Weather
@@ -82,10 +80,13 @@ in at send time from data sources, including external APIs. Proposed shape:
   - a local command's output (opt-in, for your own scripts and sensors);
   - other apps can already send through the API with a `--send` token, and
     get the same gatekeeper limits.
-- [ ] **Safety:** every automated send goes through the gatekeeper's
+- [x] **Safety:** every automated send goes through the gatekeeper's
   automation limits (each job at most every 6 h, 4 automated sends a day in
   total, paused above 20% channel utilization, 30 s apart); no auto-replies
   to incoming messages; a per-job log of what was sent or skipped, and why.
+
+- [ ] Event triggers (a favorite node going quiet or coming back, the channel
+  staying busy): not built yet; schedules only for now.
 
 **Deferred from the API (roadmap step 3)**
 - [ ] Optional output to a local MQTT broker (Home Assistant and similar),

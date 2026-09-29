@@ -669,6 +669,63 @@ def _routes(radio):
             raise ApiError(400, "ids must be a list of alert ids")
         return {"acknowledged": store.acknowledge_alerts(ids)}
 
+    def automation_state(c, b, q):
+        from .automation import PRESETS, describe_trigger, gate_source, jitter, next_slot
+
+        now = time.time()
+        jobs = []
+        for job in store.automation_jobs():
+            nxt = next_slot(job["trigger"], now, anchor=job["created_at"])
+            jobs.append({**job, "schedule": describe_trigger(job["trigger"]), "gate_source": gate_source(job),
+                         "next_run": nxt + jitter(job["id"], nxt) if job["enabled"] else None})
+        return {"jobs": jobs, "runs": _rows(store.automation_runs(limit=q.limit(100))), "presets": PRESETS,
+                "allow_commands": store.station("automation_commands") is True}
+
+    def automation_save(c, b, q):
+        from .automation import validate_job
+
+        job = {k: b.get(k) for k in ("id", "name", "enabled", "dry_run", "trigger", "destination", "template", "sources")}
+        job["sources"] = job["sources"] or []
+        if job["enabled"] is None:
+            job["enabled"] = True
+        if job["id"] is None:
+            job["dry_run"] = True  # every new job starts as a dry run
+        elif job["dry_run"] is None:
+            job["dry_run"] = store.automation_job(job["id"])["dry_run"]
+        try:
+            validate_job(job)
+            job_id = store.save_automation_job(job)
+        except ValueError as ex:
+            raise ApiError(400, str(ex))
+        store.record_event("automation", f"saved job {job_id} {job['name']!r} (dry run: {job['dry_run']})")
+        return {"id": job_id}
+
+    def automation_preview(c, b, q):
+        from .automation import preview, validate_job
+
+        try:
+            validate_job({**b, "name": b.get("name") or "preview"})
+        except ValueError as ex:
+            raise ApiError(400, str(ex))
+        text, problem = preview(store, b, radio.status())
+        return {"text": text, "problem": problem, "bytes": len(text.encode("utf-8")) if text else None,
+                "limit": MAX_TEXT_BYTES}
+
+    def automation_delete(c, b, q):
+        job_id = body_args(b, "id")["id"]
+        if not store.delete_automation_job(job_id):
+            raise ApiError(404, "no such job")
+        store.record_event("automation", f"deleted job {job_id}")
+        return {"ok": True}
+
+    def automation_settings(c, b, q):
+        allow = body_args(b, "allow_commands")["allow_commands"]
+        if not isinstance(allow, bool):
+            raise ApiError(400, "allow_commands must be true or false")
+        store.set_station("automation_commands", allow)
+        store.record_event("automation", f"local commands {'allowed' if allow else 'off'}")
+        return {"allow_commands": allow}
+
     def send(c, b, q):
         args = body_args(b, "text", optional=("channel", "to", "reply_id", "emoji"))
         return radio.send_text(**args, source=c.source, allow_broadcast=c.allow_broadcast)
@@ -688,6 +745,11 @@ def _routes(radio):
         ("GET", "/api/alerts"): ("read", lambda c, b, q: {"alerts": _rows(
             store.alerts(limit=q.limit(), open_only=q.str("open") in ("1", "true")))}),
         ("POST", "/api/alerts/ack"): ("owner", ack_alerts),
+        ("GET", "/api/automation"): ("owner", automation_state),
+        ("POST", "/api/automation/save"): ("owner", automation_save),
+        ("POST", "/api/automation/preview"): ("owner", automation_preview),
+        ("POST", "/api/automation/delete"): ("owner", automation_delete),
+        ("POST", "/api/automation/settings"): ("owner", automation_settings),
         ("GET", "/api/requests"): ("read", lambda c, b, q: {"requests": _rows(
             store.requests(limit=q.limit()), parse=("response_json",))}),
         ("GET", "/api/tx"): ("read", lambda c, b, q: radio.tx_status(limit=q.limit(20))),

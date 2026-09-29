@@ -19,6 +19,7 @@ from ..airtime import Gatekeeper
 from ..store import Store
 from .activity import KIND_LABELS, ActivityTracker
 from .alerts import AlertCenter, AlertsTab
+from .automation import AutomationTab
 from .channels import ChannelsTab
 from .coverage import CoverageTab
 from .chat import ChatTab
@@ -56,6 +57,7 @@ class MainWindow(QMainWindow):
         self.coverage = CoverageTab(self)
         self.channels = ChannelsTab(self)
         self.alerts_tab = AlertsTab(self)
+        self.automation = AutomationTab(self)
         self.device = DeviceTab(self)
         self.tabs.addTab(self.chat, "Chat")
         self.tabs.addTab(self.map, "Map")
@@ -63,6 +65,7 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.coverage, "Coverage")
         self.tabs.addTab(self.channels, "Channels")
         self.tabs.addTab(self.alerts_tab, "Alerts")
+        self.tabs.addTab(self.automation, "Automation")
         self.tabs.addTab(self.device, "Device")
         # The emergency banner sits above the tabs, so it shows whichever tab is open.
         self.alert_center = AlertCenter(self)
