@@ -282,9 +282,11 @@ crash's stack trace goes to `gui-crash.log` beside it.
   precisely your location is shared (e.g. 13 bits is about a 5.8 × 4.4 km
   area; 0 shares none). Keys are only shown to the app itself, never to API
   tokens, and every change is a config write through the gatekeeper.
-- **Device:** **Other apps (API tokens)** lists the tokens other apps use,
-  with what each can do and when it was last used; create one (shown once,
-  with a copy button) or revoke it. Same as `meshshack token`.
+- **Other apps:** requests from apps waiting for your approval (Approve /
+  Deny, with a notification when one arrives, and the count on the tab),
+  the tokens apps use (what each can do, when last used; create one, shown
+  once with a copy button, or revoke it), and what apps have sent recently.
+  See [API for other apps](#api-for-other-apps).
 - **Device:** at the bottom, **this station's history**: your radio reports
   channel utilization, transmit airtime, battery and voltage about once a
   minute, so you can watch how busy the mesh is around you (with the 25%
@@ -350,41 +352,65 @@ so a fixed station's own broadcast intervals matter most of all.
 
 The logger serves a small HTTP API on `http://127.0.0.1:8765`, reachable
 only from this machine. The desktop app uses it with the token in
-`hub.json`, and it's the only caller that can change the radio's settings
-or flip the transmit switch. Other apps get their own tokens:
+`hub.json`. Other apps get their own tokens, from the **Other apps** tab
+or the command line:
 
 ```bash
 .venv/bin/meshshack token create weather-display          # read only
 .venv/bin/meshshack token create pager --send             # read + direct messages
 .venv/bin/meshshack token create bulletin --send --allow-broadcast
+.venv/bin/meshshack token create dashboard --config       # read + restricted settings
 .venv/bin/meshshack token                                 # list, with last use
 .venv/bin/meshshack token revoke pager
 ```
 
 A token is shown once; only its hash is stored. Send it as
-`Authorization: Bearer <token>`. Every send from a token goes through the
-airtime gatekeeper with its own budget (see [Airtime](#airtime)).
+`Authorization: Bearer <token>`. What a token can do:
 
-| Endpoint | Scope | What it does |
+- **read**, always: everything in the log.
+- **send**, optionally: messages and requests, each through the airtime
+  gatekeeper with the token's own budget (see [Airtime](#airtime)); channel
+  broadcasts only if also allowed.
+- **settings (`config`)**, optionally, highly restricted:
+  - **right away**, only changes that can't add airtime or expose anything:
+    turn transmitting **off**, favorite/ignore nodes, acknowledge alerts
+    and edit alert keywords, add coverage notes, save automation jobs as
+    **dry runs**;
+  - **everything else waits for your approval**: turn transmitting on,
+    reboot, the node's name/role/position, channel changes, taking an
+    automation job live, deleting one, allowing local commands. The app
+    gets HTTP 202 with an approval id; you get a notification and approve
+    or deny it in the **Other apps** tab, where it's described in plain
+    words ("Rename this node to …"). Approved, it runs exactly as asked.
+    Requests expire after a day. `GET /api/approvals` shows an app its own.
+- **never** available to apps: channel keys, automation job details, tokens,
+  and deciding approvals.
+
+| Endpoint | Needs | What it does |
 |----------|-------|--------------|
 | `GET /api/status` | read | Radio, LoRa settings, channels, battery |
-| `GET /api/nodes?since=24h` | read | Nodes, with `via` (radio, mqtt, both, unknown) |
+| `GET /api/nodes?since=24h` | read | Nodes, with `via` (direct, radio, both, mqtt, inferred, unknown), `via_label` and `via_why` |
 | `GET /api/messages?since=&channel=&peer=` | read | Text messages; a channel or a DM peer gives that conversation |
 | `GET /api/packets?since=&type=&node=` | read | Raw packets, fully decoded |
 | `GET /api/telemetry?since=&kind=&node=` | read | Telemetry reports |
 | `GET /api/positions?since=&node=` | read | Position history |
 | `GET /api/requests` | read | Traceroutes and requests, with replies |
-| `GET /api/coverage?since=` | read | Direct neighbors (distance, bearing, SNR, margin) and traffic sources |
-| `GET /api/alerts?open=1` | read | Emergency alerts (also streamed as `alert` events) |
+| `GET /api/coverage?since=` | read | Direct neighbors and traffic sources |
+| `GET /api/alerts?open=1` | read | Emergency alerts |
 | `GET /api/tx` | read | Transmit switch and recent send decisions |
-| `GET /api/events` | read | Live stream (server-sent events): `packet`, `message`, `alert`, `connection` |
-| `POST /api/send` `{text, to \| channel}` | send | Direct message, or a channel broadcast if the token allows broadcasts |
+| `GET /api/events` | read | Live stream (server-sent events): `packet`, `message`, `alert`, `approval`, `connection` |
+| `POST /api/send` `{text, to \| channel, reply_id?, emoji?}` | send | Message, reply, or reaction; a channel message only with broadcast permission |
 | `POST /api/traceroute` `{to}` | send | Traceroute (spaced 3 min apart; a node at most every 3 h) |
 | `POST /api/request` `{to, what}` | send | Ask a node for `position`, `telemetry` or `nodeinfo` |
 | `POST /api/announce` | send | Broadcast this node's info (needs broadcast permission) |
-| `POST /api/tx`, `/api/reboot`, `/api/config/*` | app only | Kill switch, reboot, owner/role/position |
-| `POST /api/alerts/ack` `{ids \| all}` | app only | Acknowledge alerts |
-| `GET /api/automation`, `POST /api/automation/{save,preview,delete,settings}` | app only | Automation jobs |
+| `POST /api/tx {enabled: false}` | config | Turn transmitting off |
+| `POST /api/nodes/favorite`, `/api/nodes/ignore` | config | Favorite / ignore a node |
+| `POST /api/alerts/ack`, `/api/alerts/rules` | config | Acknowledge alerts; alert keywords and options |
+| `POST /api/coverage/notes {text}` | config | Add a coverage note |
+| `POST /api/automation/save` | config (dry run) / approval (live) | Save an automation job |
+| `POST /api/tx {enabled: true}`, `/api/reboot`, `/api/config/{owner,role,position}`, `/api/channels/{add,update,delete}`, `/api/automation/{delete,settings}` | approval | Queued for you to approve |
+| `GET /api/approvals` | config | This app's requests and what became of them |
+| `GET /api/channels`, `GET /api/automation`, `POST /api/automation/preview`, `POST /api/approvals/decide` | app only | Keys, job details, deciding requests |
 
 `since` takes a unix time or a duration like `30m`, `24h`, `7d`; `limit`
 caps rows (at most 1000). Nodes can be given as `!a1b2c3d4` or a number.

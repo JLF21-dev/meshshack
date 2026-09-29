@@ -49,9 +49,6 @@ class DeviceTab(QWidget):
         grid.addWidget(self._role_group(), 2, 0)
         grid.addWidget(self._position_group(), 2, 1)
         grid.addWidget(self._history_group(), 3, 0, 1, 2)
-        from .tokens import TokensGroup
-        self.tokens = TokensGroup(win)
-        grid.addWidget(self.tokens, 4, 0, 1, 2)
         grid.setColumnStretch(0, 1)
         grid.setColumnStretch(1, 1)
 

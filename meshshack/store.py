@@ -184,6 +184,21 @@ CREATE TABLE IF NOT EXISTS automation_state (
     PRIMARY KEY (job_id, subject)
 );
 
+-- Changes other apps asked for that need your approval in the app (see api.py). They run only
+-- once approved, exactly as requested; pending ones expire after a day.
+CREATE TABLE IF NOT EXISTS approvals (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    at           REAL NOT NULL,
+    token_name   TEXT NOT NULL,
+    method       TEXT NOT NULL,
+    path         TEXT NOT NULL,
+    body         TEXT NOT NULL,
+    summary      TEXT NOT NULL,
+    status       TEXT NOT NULL DEFAULT 'pending',  -- pending, approved, denied, failed, expired
+    decided_at   REAL,
+    result       TEXT
+);
+
 -- Small facts about this station that the radio doesn't hand back, e.g. the exact fixed
 -- position (the radio only reports it rounded to the channel's position precision).
 CREATE TABLE IF NOT EXISTS station (
@@ -1099,8 +1114,8 @@ class Store:
         """Returns the new token. It's shown once; only its hash is stored."""
         if not TOKEN_NAME.fullmatch(name or ""):
             raise ValueError("name: 1-32 of a-z, 0-9, - and _, starting with a letter or digit")
-        if not set(scopes) <= {"read", "send"} or "read" not in scopes:
-            raise ValueError("scopes must be read, or read and send")
+        if not set(scopes) <= {"read", "send", "config"} or "read" not in scopes:
+            raise ValueError("scopes: read, plus optionally send and config")
         token = "mst_" + secrets.token_urlsafe(32)
         with self._lock, self._conn:
             try:
@@ -1125,6 +1140,36 @@ class Store:
 
     def tokens(self):
         return self._query("SELECT * FROM api_tokens ORDER BY id")
+
+    APPROVAL_TTL = 86400
+
+    def request_approval(self, token_name, method, path, body, summary, now=None):
+        with self._lock, self._conn:
+            return self._conn.execute(
+                "INSERT INTO approvals (at, token_name, method, path, body, summary) VALUES (?, ?, ?, ?, ?, ?)",
+                (now or time.time(), token_name, method, path, json.dumps(body), summary),
+            ).lastrowid
+
+    def approvals(self, limit=100, token_name=None, pending_only=False, now=None):
+        """Newest first. Pending requests older than a day are marked expired first."""
+        with self._lock, self._conn:
+            self._conn.execute("UPDATE approvals SET status = 'expired', decided_at = ? WHERE status = 'pending' AND at < ?",
+                               (now or time.time(), (now or time.time()) - self.APPROVAL_TTL))
+        where, params = ["1"], []
+        if token_name is not None:
+            where.append("token_name = ?")
+            params.append(token_name)
+        if pending_only:
+            where.append("status = 'pending'")
+        return self._query(f"SELECT * FROM approvals WHERE {' AND '.join(where)} ORDER BY id DESC LIMIT ?",
+                           (*params, limit))
+
+    def decide_approval(self, approval_id, status, result=None, now=None):
+        with self._lock, self._conn:
+            return self._conn.execute(
+                "UPDATE approvals SET status = ?, decided_at = ?, result = ? WHERE id = ? AND status = 'pending'",
+                (status, now or time.time(), json.dumps(result) if result is not None else None, approval_id),
+            ).rowcount > 0
 
     def revoke_token(self, name, now=None):
         with self._lock, self._conn:

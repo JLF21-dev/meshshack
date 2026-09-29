@@ -315,10 +315,10 @@ def test_send_token_is_budgeted_and_kept_off_config(api, store):
     assert status == 429 and "30 s apart" in body["error"]  # unattended sends are spaced
     status, body = call("POST", "/api/send", {"text": "to everyone", "channel": 0}, token=token)
     assert status == 403 and "Broadcasts aren't allowed" in body["error"]
-    for path, body in (("/api/reboot", {}), ("/api/tx", {"enabled": False}),
-                       ("/api/config/role", {"role": "CLIENT"})):
+    for path, body, why in (("/api/reboot", {}, "config scope"), ("/api/tx", {"enabled": False}, "'config' scope"),
+                            ("/api/config/role", {"role": "CLIENT"}, "config scope")):
         status, result = call("POST", path, body, token=token)
-        assert status == 403 and "only the MeshShack app" in result["error"]
+        assert status == 403 and why in result["error"], path  # a send-only token can't change settings
     log = store.tx_log()
     assert log[-1]["source"] == "api:pager" and log[-1]["allowed"] == 1
 
@@ -437,3 +437,52 @@ def test_coverage_endpoint(api, store):
     token = store.create_token("mapper", {"read"})
     status, body = call("GET", "/api/coverage?since=1h", token=token)
     assert status == 200 and body["neighbors"][0]["num"] == BOB and body["totals"]["direct"] == 1
+
+
+
+def test_config_scope_immediate_changes_and_approvals(api, store):
+    call, iface, _ = api
+    token = store.create_token("dashboard", {"read", "config"})
+    # Changes that can't add airtime happen right away.
+    assert call("POST", "/api/nodes/favorite", {"node": BOB, "favorite": True}, token=token)[0] == 200
+    assert call("POST", "/api/alerts/rules", {"keywords": ["SOS", "FIRE"]}, token=token)[1]["rules"]["keywords"] == ["SOS", "FIRE"]
+    assert call("POST", "/api/coverage/notes", {"text": "antenna up"}, token=token)[0] == 200
+    assert call("POST", "/api/tx", {"enabled": False}, token=token)[0] == 200  # off: fine
+    # Anything else waits for the user.
+    status, body = call("POST", "/api/tx", {"enabled": True}, token=token)
+    assert status == 202 and body["status"] == "pending" and body["summary"] == "Turn transmitting ON"
+    assert store.station("transmit_enabled") is False  # nothing happened yet
+    status, body2 = call("POST", "/api/config/owner", {"long_name": "Evil", "short_name": "EVL"}, token=token)
+    assert status == 202 and "“Evil” (EVL)" in body2["summary"] and not iface.localNode.calls[-1][0] == "setOwner"
+    assert call("GET", "/api/channels", token=token)[0] == 403  # keys: never
+    assert call("POST", "/api/approvals/decide", {"id": body["approval"], "approve": True}, token=token)[0] == 403
+    mine = call("GET", "/api/approvals", token=token)[1]["approvals"]
+    assert [a["status"] for a in mine] == ["pending", "pending"]
+
+    # The user approves one and denies the other, in the app.
+    assert call("POST", "/api/approvals/decide", {"id": body["approval"], "approve": True})[1]["status"] == "approved"
+    assert store.station("transmit_enabled") is True
+    assert call("POST", "/api/approvals/decide", {"id": body2["approval"], "approve": False})[1]["status"] == "denied"
+    assert all(c[0] != "setOwner" for c in iface.localNode.calls)
+    statuses = {a["id"]: a["status"] for a in call("GET", "/api/approvals", token=token)[1]["approvals"]}
+    assert statuses == {body["approval"]: "approved", body2["approval"]: "denied"}
+
+
+def test_config_scope_automation_is_dry_run_unless_approved(api, store):
+    call, iface, _ = api
+    token = store.create_token("scheduler", {"read", "config"})
+    job = {"name": "Weather", "trigger": {"type": "daily", "at": "07:00"}, "destination": {"channel": 0},
+           "template": "hi", "sources": []}
+    status, body = call("POST", "/api/automation/save", job, token=token)
+    assert status == 200 and store.automation_job(body["id"])["dry_run"]  # saved, as a dry run
+    status, pending = call("POST", "/api/automation/save", {**job, "id": body["id"], "dry_run": False}, token=token)
+    assert status == 202 and "LIVE" in pending["summary"] and store.automation_job(body["id"])["dry_run"]
+    call("POST", "/api/approvals/decide", {"id": pending["approval"], "approve": True})
+    assert not store.automation_job(body["id"])["dry_run"]  # live, because the user approved it
+    assert call("GET", "/api/automation", token=token)[0] == 403  # job details (URLs, keys) stay in the app
+
+
+def test_pending_requests_expire(store):
+    old = store.request_approval("x", "POST", "/api/reboot", {}, "Reboot the radio", now=1000)
+    assert [a["status"] for a in store.approvals(now=1000 + 86400 + 1)] == ["expired"]
+    assert not store.decide_approval(old, "approved")

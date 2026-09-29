@@ -117,6 +117,13 @@ quiet = store.save_automation_job({**PRESETS["A favorite went quiet (notify me)"
 store.record_automation_run(quiet, now - 5400, "notified", "SOL (Solar Relay) hasn't been heard for 6 h.", None,
                             now=now - 5400, subject=0x22222222)
 
+# An app with the settings permission, and one change it's waiting on you to approve.
+store.create_token("home-dashboard", {"read", "config"})
+store.request_approval("home-dashboard", "POST", "/api/config/position",
+                       {"broadcast_secs": 3600, "smart_enabled": False, "gps_mode": "NOT_PRESENT"},
+                       "Change position settings: broadcast every 3600 s, smart broadcast off, GPS NOT_PRESENT",
+                       now=now - 300)
+
 iface = FakeInterface()
 iface.localNode.localConfig.device.role = 12  # CLIENT_BASE
 iface.localNode.localConfig.position.position_broadcast_secs = 900
@@ -137,7 +144,7 @@ steps = []
 def shot(name):
     win.grab().save(str(out / f"gui_{name}.png")); print("saved", name)
 def seq(i=0):
-    plan = [(0, "chat"), (1, "map"), (2, "nodes"), (3, "coverage"), (4, "channels"), (5, "alerts"), (6, "automation"), (7, "device")]
+    plan = [(0, "chat"), (1, "map"), (2, "nodes"), (3, "coverage"), (4, "channels"), (5, "alerts"), (6, "automation"), (7, "other_apps"), (8, "device")]
     if i < len(plan):
         idx, name = plan[i]
         win.tabs.setCurrentIndex(idx)

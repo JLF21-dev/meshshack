@@ -1,4 +1,7 @@
-"""Device tab section: tokens for other apps using the local API (same as `meshshack token`)."""
+"""Other apps tab: requests waiting for your approval, app tokens, and what apps have done.
+
+Everything here goes straight to the database (tokens, approvals are decided through the logger's
+API so an approved change runs exactly as the app asked, with the app's own authority)."""
 
 import time
 
@@ -6,7 +9,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QDialog, QDialogButtonBox, QFormLayout, QGroupBox, QHBoxLayout, QHeaderView,
-    QLabel, QLineEdit, QMessageBox, QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout,
+    QLabel, QLineEdit, QMessageBox, QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from .common import fmt_ago
@@ -21,6 +24,10 @@ class NewTokenDialog(QDialog):
         self.name.setPlaceholderText("e.g. weather-display")
         self.send = QCheckBox("Can send direct messages (read access is always included)")
         self.broadcast = QCheckBox("Can also broadcast on channels")
+        self.config = QCheckBox("Can change settings (restricted)")
+        self.config.setToolTip("Right away: turn transmitting off, favorite/ignore nodes, alert keywords, coverage "
+                               "notes, dry-run automation jobs. Anything else it asks for (transmit on, reboot, name, "
+                               "role, position, channels, taking a job live) waits for your approval here.")
         self.broadcast.setEnabled(False)
         self.send.toggled.connect(lambda on: (self.broadcast.setEnabled(on), on or self.broadcast.setChecked(False)))
         note = QLabel("Every send from a token goes through the airtime gatekeeper with its own budget "
@@ -32,6 +39,7 @@ class NewTokenDialog(QDialog):
         form.addRow("Name", self.name)
         form.addRow(self.send)
         form.addRow(self.broadcast)
+        form.addRow(self.config)
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self._create)
         buttons.rejected.connect(self.reject)
@@ -42,7 +50,7 @@ class NewTokenDialog(QDialog):
         self.token = None
 
     def _create(self):
-        scopes = {"read", "send"} if self.send.isChecked() else {"read"}
+        scopes = {"read"} | ({"send"} if self.send.isChecked() else set()) | ({"config"} if self.config.isChecked() else set())
         try:
             self.token = self.store.create_token(self.name.text().strip(), scopes,
                                                  allow_broadcast=self.broadcast.isChecked())
@@ -100,7 +108,8 @@ class TokensGroup(QGroupBox):
         buttons.addWidget(new)
         buttons.addWidget(self.revoke)
         buttons.addStretch(1)
-        intro = QLabel("Apps on this computer can read the log, and optionally send, through the local API.")
+        intro = QLabel("Every token can read the log; it can also be allowed to send (under the airtime limits) "
+                       "and to change settings (restricted, see above).")
         intro.setStyleSheet("color: gray")
         layout = QVBoxLayout(self)
         layout.addWidget(intro)
@@ -112,7 +121,9 @@ class TokensGroup(QGroupBox):
         tokens = self.store.tokens()
         self.table.setRowCount(len(tokens))
         for r, t in enumerate(tokens):
-            can = "read" if t["scopes"] == "read" else "read, send" + (", broadcast" if t["allow_broadcast"] else "")
+            scopes = t["scopes"].split(",")
+            can = ", ".join(["read"] + (["send"] + (["broadcast"] if t["allow_broadcast"] else []) if "send" in scopes else [])
+                            + (["settings (restricted)"] if "config" in scopes else []))
             cells = [t["name"], can, time.strftime("%Y-%m-%d", time.localtime(t["created_at"])),
                      fmt_ago(t["last_used_at"]) if t["last_used_at"] else "never",
                      "revoked" if t["revoked_at"] else "active"]
@@ -148,3 +159,146 @@ class TokensGroup(QGroupBox):
                 QMessageBox.Yes | QMessageBox.Cancel, QMessageBox.Cancel) == QMessageBox.Yes:
             self.store.revoke_token(t["name"])
             self.refresh()
+
+
+class ApprovalsGroup(QGroupBox):
+    """Changes other apps asked for. Nothing happens until you approve; requests expire after a day."""
+
+    COLUMNS = ["Asked", "App", "Wants to", "Status"]
+
+    def __init__(self, win):
+        super().__init__("Requests waiting for you")
+        self.win = win
+        self.store = win.store
+        self.table = QTableWidget(0, len(self.COLUMNS))
+        self.table.setHorizontalHeaderLabels(self.COLUMNS)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.table.verticalHeader().setVisible(False)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        self.table.setMinimumHeight(140)
+        self.approve = QPushButton("Approve…")
+        self.approve.clicked.connect(lambda: self._decide(True))
+        self.deny = QPushButton("Deny")
+        self.deny.clicked.connect(lambda: self._decide(False))
+        self.table.itemSelectionChanged.connect(self._update)
+        buttons = QHBoxLayout()
+        buttons.addWidget(self.approve)
+        buttons.addWidget(self.deny)
+        buttons.addStretch(1)
+        intro = QLabel("Apps with the settings permission can change a few harmless things themselves; anything "
+                       "else they ask for waits here. Approved, it runs exactly as asked.")
+        intro.setWordWrap(True)
+        intro.setStyleSheet("color: gray")
+        layout = QVBoxLayout(self)
+        layout.addWidget(intro)
+        layout.addWidget(self.table)
+        layout.addLayout(buttons)
+        self._seen_pending = {r["id"] for r in self.store.approvals(pending_only=True)}
+        win.dataChanged.connect(self.refresh)
+        self.refresh()
+
+    def refresh(self):
+        rows = self.store.approvals(limit=100)
+        self.table.setRowCount(len(rows))
+        for r, a in enumerate(rows):
+            cells = [time.strftime("%b %-d %H:%M", time.localtime(a["at"])), a["token_name"], a["summary"],
+                     a["status"].upper() if a["status"] == "pending" else a["status"]]
+            for c, text in enumerate(cells):
+                item = QTableWidgetItem(text)
+                item.setData(Qt.UserRole, a["id"])
+                if a["status"] != "pending":
+                    item.setForeground(Qt.gray)
+                self.table.setItem(r, c, item)
+        pending = [a for a in rows if a["status"] == "pending"]
+        new = [a for a in pending if a["id"] not in self._seen_pending]
+        self._seen_pending |= {a["id"] for a in new}
+        for a in new:  # tell the user, even with the window hidden
+            if self.win.tray is not None:
+                from .tray import app_icon
+                self.win.tray.showMessage(f"MeshShack: {a['token_name']} asks for approval", a["summary"], app_icon(), 20000)
+        self.setTitle(f"Requests waiting for you ({len(pending)})" if pending else "Requests waiting for you")
+        tabs = getattr(self.win, "tabs", None)
+        page = getattr(self.win, "other_apps", None)
+        if tabs is not None and page is not None:
+            tabs.setTabText(tabs.indexOf(page), f"Other apps ({len(pending)})" if pending else "Other apps")
+        self._update()
+
+    def _selected(self):
+        rows = self.table.selectionModel().selectedRows()
+        if not rows:
+            return None
+        approval_id = self.table.item(rows[0].row(), 0).data(Qt.UserRole)
+        return next((a for a in self.store.approvals(limit=100) if a["id"] == approval_id), None)
+
+    def _update(self):
+        a = self._selected()
+        pending = a is not None and a["status"] == "pending"
+        self.approve.setEnabled(pending)
+        self.deny.setEnabled(pending)
+
+    def _decide(self, approve):
+        a = self._selected()
+        if a is None:
+            return
+        if approve and QMessageBox.question(
+                self, "Approve request", f"{a['token_name']} asks to:\n\n{a['summary']}\n\nApprove it? It runs right away.",
+                QMessageBox.Yes | QMessageBox.Cancel, QMessageBox.Cancel) != QMessageBox.Yes:
+            return
+
+        def done(result, error):
+            if error:
+                QMessageBox.warning(self, "Request", f"That didn't work: {error}")
+            elif result.get("status") == "failed":
+                QMessageBox.warning(self, "Request", f"Approved, but it failed: {result.get('error')}")
+            else:
+                self.win.toast(f"Request {result.get('status')}")
+            self.refresh()
+
+        self.win.hub.post("/api/approvals/decide", {"id": a["id"], "approve": approve}, done)
+
+
+class OtherAppsTab(QWidget):
+    def __init__(self, win):
+        super().__init__()
+        from PySide6.QtWidgets import QScrollArea
+        self.approvals = ApprovalsGroup(win)
+        self.tokens = TokensGroup(win)
+        activity = QGroupBox("What apps have sent recently")
+        self.activity = QTableWidget(0, 5)
+        self.activity.setHorizontalHeaderLabels(["Time", "App", "Kind", "Result", "Note"])
+        self.activity.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.activity.verticalHeader().setVisible(False)
+        self.activity.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.activity.horizontalHeader().setStretchLastSection(True)
+        self.activity.setMinimumHeight(140)
+        QVBoxLayout(activity).addWidget(self.activity)
+        info = QLabel("Apps on this computer use the API at <b>http://127.0.0.1:8765</b> with a token from below "
+                      "(<code>Authorization: Bearer &lt;token&gt;</code>). Endpoints and limits: README, "
+                      "“API for other apps”. Channel keys, tokens and approvals are never available to apps.")
+        info.setWordWrap(True)
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.addWidget(info)
+        layout.addWidget(self.approvals)
+        layout.addWidget(self.tokens)
+        layout.addWidget(activity)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(content)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(scroll)
+        self.store = win.store
+        win.dataChanged.connect(self._fill_activity)
+        self._fill_activity()
+
+    def _fill_activity(self):
+        rows = [r for r in self.store.tx_log(limit=300) if r["source"].startswith("api:")][:50]
+        self.activity.setRowCount(len(rows))
+        for i, r in enumerate(rows):
+            for c, text in enumerate((time.strftime("%b %-d %H:%M", time.localtime(r["at"])), r["source"][4:], r["kind"],
+                                      "sent" if r["allowed"] else "refused", r["reason"] or "")):
+                self.activity.setItem(i, c, QTableWidgetItem(text))

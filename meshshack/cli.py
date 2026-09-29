@@ -205,7 +205,7 @@ def cmd_token(args, store):
             sys.exit("usage: meshshack token create NAME [--send] [--allow-broadcast]")
         if args.allow_broadcast and not args.send:
             sys.exit("--allow-broadcast only makes sense with --send")
-        scopes = {"read", "send"} if args.send else {"read"}
+        scopes = {"read"} | ({"send"} if args.send else set()) | ({"config"} if args.config else set())
         try:
             token = store.create_token(args.name, scopes, allow_broadcast=args.allow_broadcast)
         except ValueError as ex:
@@ -373,6 +373,9 @@ def build_parser():
     p.add_argument("--send", action="store_true", help="also allow sending (default: read only)")
     p.add_argument("--allow-broadcast", action="store_true",
                    help="with --send: also allow channel broadcasts (default: direct messages only)")
+    p.add_argument("--config", action="store_true",
+                   help="also allow restricted settings changes: harmless ones right away, the rest only "
+                        "after you approve them in the app")
     p.set_defaults(func=cmd_token)
 
     p = sub.add_parser("export", help="export nodes (csv/kml), messages, telemetry (csv) or positions (gpx)")

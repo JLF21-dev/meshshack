@@ -396,7 +396,7 @@ def test_token_management_in_the_app(store, qapp, tmp_path):
 
     win = MainWindow(tmp_path / "test.db")
     try:
-        group = win.device.tokens
+        group = win.other_apps.tokens
         dialog = NewTokenDialog(group, store)
         dialog.name.setText("weather-display")
         dialog.send.setChecked(True)
@@ -408,4 +408,25 @@ def test_token_management_in_the_app(store, qapp, tmp_path):
         group.refresh()
         assert group.table.item(0, 4).text() == "revoked" and store.token_for(dialog.token) is None
     finally:
+        win.close()
+
+
+def test_other_apps_tab_lists_requests(store, qapp, tmp_path):
+    from meshshack.gui.tray import Tray
+
+    win = MainWindow(tmp_path / "test.db")
+    win.tray = Tray(win, lambda: None)
+    shown = []
+    win.tray.showMessage = lambda title, text, *a: shown.append((title, text))
+    try:
+        store.request_approval("dashboard", "POST", "/api/reboot", {}, "Reboot the radio")
+        win.dataChanged.emit()
+        group = win.other_apps.approvals
+        assert group.table.rowCount() == 1 and group.table.item(0, 2).text() == "Reboot the radio"
+        assert group.table.item(0, 3).text() == "PENDING" and "(1)" in group.title()
+        assert shown == [("MeshShack: dashboard asks for approval", "Reboot the radio")]
+        win.dataChanged.emit()
+        assert len(shown) == 1  # told once
+    finally:
+        win.quitting = True
         win.close()

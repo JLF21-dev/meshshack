@@ -697,6 +697,8 @@ def _routes(radio):
             job["enabled"] = True
         if job["id"] is None:
             job["dry_run"] = True  # every new job starts as a dry run
+        if "owner" not in c.scopes:  # another app: always a dry run (going live comes back here approved)
+            job["dry_run"] = True
         elif job["dry_run"] is None:
             job["dry_run"] = store.automation_job(job["id"])["dry_run"]
         try:
@@ -733,12 +735,50 @@ def _routes(radio):
         store.record_event("automation", f"local commands {'allowed' if allow else 'off'}")
         return {"allow_commands": allow}
 
+    def automation_save_scope(c, b):
+        """A dry-run job is a harmless change; one that is (or would become) live needs approval."""
+        existing = store.automation_job(b["id"]) if isinstance(b.get("id"), int) else None
+        live = b.get("dry_run") is False or (existing is not None and not existing["dry_run"])
+        return "approve" if live else "config"
+
+    def alert_rules(c, b, q):
+        from . import alerts
+
+        changes = {k: b[k] for k in ("enabled", "keywords", "include_mqtt", "detection_sensors") if k in b}
+        if "keywords" in changes and (not isinstance(changes["keywords"], list)
+                                      or not all(isinstance(k, str) and k.strip() for k in changes["keywords"])):
+            raise ApiError(400, "keywords must be a list of words or phrases")
+        if any(not isinstance(changes[k], bool) for k in ("enabled", "include_mqtt", "detection_sensors") if k in changes):
+            raise ApiError(400, "enabled, include_mqtt and detection_sensors are true or false")
+        alerts.set_rules(store, **changes)
+        store.record_event("command", f"alert rules changed by {c.source}")
+        return {"rules": alerts.rules(store)}
+
+    def coverage_note(c, b, q):
+        text = body_args(b, "text")["text"]
+        if not isinstance(text, str) or not text.strip():
+            raise ApiError(400, "a note needs text")
+        notes = store.station("coverage_notes") or []
+        store.set_station("coverage_notes", notes + [{"at": time.time(), "text": text.strip()[:40]}])
+        return {"ok": True}
+
+    def list_approvals(c, b, q):
+        own = None if "owner" in c.scopes else c.source.removeprefix("api:")
+        rows = [dict(r) for r in store.approvals(limit=q.limit(), token_name=own)]
+        for r in rows:
+            r["body"] = json.loads(r["body"])
+            r["result"] = json.loads(r["result"]) if r["result"] else None
+        return {"approvals": rows}
+
     def send(c, b, q):
         args = body_args(b, "text", optional=("channel", "to", "reply_id", "emoji"))
         return radio.send_text(**args, source=c.source, allow_broadcast=c.allow_broadcast)
 
-    # (method, path) -> (scope needed, handler(caller, body, query))
-    return {
+    # (method, path) -> (scope, handler(caller, body, query)). Scopes: read, send; config (another app
+    # with the config scope may do it now; it can't add airtime); approve (the app does it now; another
+    # app with config scope gets it queued for your approval); owner (only the app, ever). A scope can
+    # be a function of (caller, body) when it depends on what's asked.
+    routes = {
         ("GET", "/api/status"): ("read", lambda c, b, q: radio.status()),
         ("GET", "/api/nodes"): ("read", nodes),
         ("GET", "/api/messages"): ("read", messages),
@@ -751,35 +791,63 @@ def _routes(radio):
         ("GET", "/api/coverage"): ("read", coverage),
         ("GET", "/api/alerts"): ("read", lambda c, b, q: {"alerts": _rows(
             store.alerts(limit=q.limit(), open_only=q.str("open") in ("1", "true")))}),
-        ("POST", "/api/alerts/ack"): ("owner", ack_alerts),
+        ("POST", "/api/alerts/ack"): ("config", ack_alerts),
+        ("POST", "/api/alerts/rules"): ("config", alert_rules),
+        ("POST", "/api/coverage/notes"): ("config", coverage_note),
         ("GET", "/api/automation"): ("owner", automation_state),
-        ("POST", "/api/automation/save"): ("owner", automation_save),
+        ("POST", "/api/automation/save"): (automation_save_scope, automation_save),
         ("POST", "/api/automation/preview"): ("owner", automation_preview),
-        ("POST", "/api/automation/delete"): ("owner", automation_delete),
-        ("POST", "/api/automation/settings"): ("owner", automation_settings),
+        ("POST", "/api/automation/delete"): ("approve", automation_delete),
+        ("POST", "/api/automation/settings"): ("approve", automation_settings),
         ("GET", "/api/requests"): ("read", lambda c, b, q: {"requests": _rows(
             store.requests(limit=q.limit()), parse=("response_json",))}),
         ("GET", "/api/tx"): ("read", lambda c, b, q: radio.tx_status(limit=q.limit(20))),
-        ("POST", "/api/tx"): ("owner", lambda c, b, q: radio.set_transmit(**body_args(b, "enabled"))),
+        ("POST", "/api/tx"): (lambda c, b: "config" if b.get("enabled") is False else "approve",
+                               lambda c, b, q: radio.set_transmit(**body_args(b, "enabled"))),
         ("POST", "/api/send"): ("send", send),
         ("POST", "/api/traceroute"): ("send", lambda c, b, q: radio.traceroute(**body_args(b, "to"), source=c.source)),
         ("POST", "/api/request"): ("send", lambda c, b, q: radio.request(**body_args(b, "to", "what"), source=c.source)),
         ("POST", "/api/announce"): ("send", lambda c, b, q: radio.announce(source=c.source, allow_broadcast=c.allow_broadcast)),
-        ("POST", "/api/reboot"): ("owner", lambda c, b, q: radio.reboot()),
+        ("POST", "/api/reboot"): ("approve", lambda c, b, q: radio.reboot()),
         ("GET", "/api/channels"): ("owner", lambda c, b, q: radio.channels()),
-        ("POST", "/api/nodes/favorite"): ("owner", lambda c, b, q: radio.set_favorite(**body_args(b, "node", "favorite"))),
-        ("POST", "/api/nodes/ignore"): ("owner", lambda c, b, q: radio.set_ignored(**body_args(b, "node", "ignored"))),
-        ("POST", "/api/channels/add"): ("owner", lambda c, b, q: radio.add_channel(
+        ("POST", "/api/nodes/favorite"): ("config", lambda c, b, q: radio.set_favorite(**body_args(b, "node", "favorite"))),
+        ("POST", "/api/nodes/ignore"): ("config", lambda c, b, q: radio.set_ignored(**body_args(b, "node", "ignored"))),
+        ("POST", "/api/channels/add"): ("approve", lambda c, b, q: radio.add_channel(
             **body_args(b, "name", optional=("key", "position_precision")))),
-        ("POST", "/api/channels/update"): ("owner", lambda c, b, q: radio.update_channel(
+        ("POST", "/api/channels/update"): ("approve", lambda c, b, q: radio.update_channel(
             **body_args(b, "index", optional=("name", "key", "position_precision")))),
-        ("POST", "/api/channels/delete"): ("owner", lambda c, b, q: radio.delete_channel(**body_args(b, "index"))),
-        ("POST", "/api/config/owner"): ("owner", lambda c, b, q: radio.set_owner(**body_args(b, "long_name", "short_name"))),
-        ("POST", "/api/config/role"): ("owner", lambda c, b, q: radio.set_role(**body_args(b, "role"))),
-        ("POST", "/api/config/position"): ("owner", lambda c, b, q: radio.set_position(
+        ("POST", "/api/channels/delete"): ("approve", lambda c, b, q: radio.delete_channel(**body_args(b, "index"))),
+        ("POST", "/api/config/owner"): ("approve", lambda c, b, q: radio.set_owner(**body_args(b, "long_name", "short_name"))),
+        ("POST", "/api/config/role"): ("approve", lambda c, b, q: radio.set_role(**body_args(b, "role"))),
+        ("POST", "/api/config/position"): ("approve", lambda c, b, q: radio.set_position(
             **body_args(b, "broadcast_secs", "smart_enabled", "gps_mode", optional=("fixed",))
         )),
     }
+
+    def decide(c, b, q):
+        """Approve or deny a request from another app. Approved, it runs exactly as it was asked, as the app."""
+        args = body_args(b, "id", "approve")
+        rows = [r for r in store.approvals(pending_only=True) if r["id"] == args["id"]]
+        if not rows:
+            raise ApiError(404, "no pending request with that id")
+        req = rows[0]
+        if not args["approve"]:
+            store.decide_approval(req["id"], "denied")
+            store.record_event("approval", f"denied #{req['id']} from {req['token_name']}: {req['summary']}")
+            return {"status": "denied"}
+        _scope, handler = routes[(req["method"], req["path"])]
+        try:
+            result = handler(c, json.loads(req["body"]), Query(""))
+        except ApiError as ex:
+            store.decide_approval(req["id"], "failed", {"error": str(ex)})
+            return {"status": "failed", "error": str(ex)}
+        store.decide_approval(req["id"], "approved", result)
+        store.record_event("approval", f"approved #{req['id']} from {req['token_name']}: {req['summary']}")
+        return {"status": "approved", "result": result}
+
+    routes[("GET", "/api/approvals")] = ("config", list_approvals)
+    routes[("POST", "/api/approvals/decide")] = ("owner", decide)
+    return routes
 
 
 class ApiServer:
@@ -796,7 +864,7 @@ class ApiServer:
         def authenticate(header):
             presented = header[len("Bearer "):] if header.startswith("Bearer ") else ""
             if presented and hmac.compare_digest(presented, owner_token):
-                return Caller("manual", frozenset({"read", "send", "owner"}), True)
+                return Caller("manual", frozenset({"read", "send", "config", "owner"}), True)
             row = store.token_for(presented) if presented else None
             if row is None:
                 raise ApiError(401, "bad or missing token")
@@ -823,9 +891,6 @@ class ApiServer:
                     if entry is None:
                         raise ApiError(404, "no such endpoint")
                     scope, handler = entry
-                    if scope not in caller.scopes:
-                        raise ApiError(403, "only the MeshShack app can do that" if scope == "owner"
-                                       else f"this token doesn't have the {scope!r} scope")
                     body = {}
                     length = int(self.headers.get("Content-Length") or 0)
                     if length:
@@ -835,6 +900,24 @@ class ApiServer:
                             raise ApiError(400, "body is not JSON")
                         if not isinstance(body, dict):
                             raise ApiError(400, "body must be a JSON object")
+                    if callable(scope):
+                        scope = scope(caller, body)
+                    if scope == "approve" and "owner" not in caller.scopes:
+                        if "config" not in caller.scopes:
+                            raise ApiError(403, "only the MeshShack app, or a token with the config scope "
+                                                "(with your approval), can do that")
+                        from .approvals import describe
+                        summary = describe(path, body, store)
+                        request_id = store.request_approval(caller.source.removeprefix("api:"), method, path, body,
+                                                           summary)
+                        store.record_event("approval", f"#{request_id} requested by {caller.source}: {summary}")
+                        server._notify_approval()
+                        return self._reply(202, {"approval": request_id, "status": "pending", "summary": summary,
+                                                 "check": "GET /api/approvals"})
+                    if scope in ("approve", "owner") and "owner" not in caller.scopes:
+                        raise ApiError(403, "only the MeshShack app can do that")
+                    if scope not in ("approve", "owner") and scope not in caller.scopes and "owner" not in caller.scopes:
+                        raise ApiError(403, f"this token doesn't have the {scope!r} scope")
                     status, result = 200, handler(caller, body, Query(raw_query))
                 except ApiError as ex:
                     status, result = ex.status, {"error": str(ex)}
@@ -881,6 +964,10 @@ class ApiServer:
         self.httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
         self.httpd.daemon_threads = True
         self.url = f"http://127.0.0.1:{self.httpd.server_address[1]}"
+
+    def _notify_approval(self):
+        if self.bus is not None:
+            self.bus.publish({"type": "approval"})
 
     def start(self):
         threading.Thread(target=self.httpd.serve_forever, name="meshshack-api", daemon=True).start()

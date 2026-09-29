@@ -89,6 +89,13 @@ in at send time from data sources, including external APIs. Proposed shape:
   low battery, the channel staying busy; once per change; "notify me" by
   default (nothing sent); busy-channel jobs can only notify.
 
+**Other apps (added after step 3)**
+- [x] An Other apps tab: approvals, tokens, recent app activity.
+- [x] A restricted settings permission: harmless changes right away, everything else only
+  after you approve it in the app; keys, tokens and approvals never exposed.
+- [x] Every node marked Direct / Radio / Internet (flagged) / Internet? (inferred from
+  distance vs hops) / both / unknown, everywhere.
+
 **Deferred from the API (roadmap step 3)**
 - [ ] Optional output to a local MQTT broker (Home Assistant and similar),
   kept separate from the mesh; it never feeds back into it.
