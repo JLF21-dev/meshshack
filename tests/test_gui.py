@@ -330,7 +330,7 @@ def test_replies_and_reactions_in_chat(store, qapp, tmp_path):
         plain = win.chat.view.toPlainText()
         assert "👍 RLY, You" in plain  # grouped under the message it reacts to
         assert "↩ RLY: anyone up for a range test?" in plain  # the reply quotes it
-        assert "RLY reacted 😂 to an earlier message" in plain
+        assert "RLY 😂 reacted to a message this station never received" in plain
         assert plain.count("👍") == 1  # not also shown as separate lines
 
         win.chat._link_clicked(QUrl("reply:114"))
@@ -375,3 +375,17 @@ def test_gui_logging_keeps_running_after_an_error(tmp_path, monkeypatch, qapp):
         for h in logger.handlers[len(before):]:
             logger.removeHandler(h)
         logger.propagate = True
+
+
+def test_reaction_to_a_message_elsewhere_quotes_it(store, qapp, tmp_path):
+    store.record_packet({"from": DEST, "to": BROADCAST_NUM, "id": 777, "channel": 0,
+                         "decoded": {"portnum": "TEXT_MESSAGE_APP", "text": "net check-in at 8"}})
+    store.record_packet({"from": RELAY, "to": ME, "id": 778, "decoded": {  # reacts, in a DM, to a channel message
+        "portnum": "TEXT_MESSAGE_APP", "text": "👍", "replyId": 777, "emoji": 1}})
+    win = MainWindow(tmp_path / "test.db")
+    try:
+        win.show()
+        win.open_dm(RELAY)
+        assert "RLY 👍 reacted to DST: “net check-in at 8”" in win.chat.view.toPlainText()
+    finally:
+        win.close()

@@ -283,6 +283,11 @@ class ChatTab(QWidget):
         def who(m):
             return "You" if m["direction"] == "out" else (m["from_short"] or m["from_id"] or "?")
 
+        # Reactions whose message isn't in this view: it may be in the log elsewhere (older, or another
+        # conversation), or this station may never have received it.
+        elsewhere = self.store.messages_by_packet(
+            {m["reply_id"] for m in rows if m["emoji"] and m["reply_id"] and m["reply_id"] not in by_packet})
+
         def snippet(m, limit=60):
             text = " ".join((m["text"] or "").split())
             return text if len(text) <= limit else text[: limit - 1] + "…"
@@ -306,8 +311,19 @@ class ChatTab(QWidget):
             text = escape(m["text"] or "").replace("\n", "<br>")
 
             if m["emoji"] and m["reply_id"]:  # a reaction to a message that isn't in this view
-                parts.append(f"<p align='center' style='color:{meta_color}'>{escape(who(m))} reacted {text}"
-                             f" to an earlier message</p>")
+                target = elsewhere.get(m["reply_id"])
+                if target is not None:
+                    what = f"reacted to {escape(who(target))}: “{escape(snippet(target))}”"
+                else:
+                    what = "reacted to a message this station never received"
+                name = "You" if outgoing else f"<b>{escape(who(m))}</b>"
+                bubble = (f"{name} <span style='font-size:large'>{text}</span> "
+                          f"<span style='color:{meta_color}'>{what}</span><br>"
+                          f"<span style='color:{meta_color}; font-size:small'>{fmt_clock(m['logged_at'])}</span>")
+                parts.append(
+                    f"<table width='100%' cellspacing='0' cellpadding='2'><tr><td align='{'right' if outgoing else 'left'}'>"
+                    f"<table bgcolor='{out_bg if outgoing else in_bg}' cellpadding='7' cellspacing='0'><tr><td>{bubble}"
+                    f"</td></tr></table></td></tr></table>")
                 continue
 
             meta = [fmt_clock(m["logged_at"])]

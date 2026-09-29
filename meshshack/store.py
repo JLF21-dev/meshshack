@@ -903,6 +903,16 @@ class Store:
         )
         return list(reversed(rows))
 
+    def messages_by_packet(self, packet_ids):
+        """{packet id: message row} for messages with these packet ids, in any conversation."""
+        ids = [int(i) for i in packet_ids if i is not None]
+        if not ids:
+            return {}
+        rows = self._query(
+            f"""SELECT m.*, n.short_name AS from_short FROM messages m LEFT JOIN nodes n ON n.num = m.from_num
+                WHERE m.packet_id IN ({','.join('?' * len(ids))}) AND COALESCE(m.emoji, 0) = 0""", ids)
+        return {r["packet_id"]: r for r in rows}
+
     def unread_count(self, channel=None, peer=None, after_id=0):
         """Received messages in a conversation newer than after_id."""
         if peer is not None:
