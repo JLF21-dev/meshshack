@@ -98,7 +98,7 @@ in at send time from data sources, including external APIs. Proposed shape:
 
 **Ideas**
 - [x] Coverage analysis: SNR against distance, bearings, link margins, and which relays carry your traffic.
-- [ ] Coverage over time: how direct links and relay shares change (e.g. after moving an antenna).
+- [x] Coverage over time: how direct links and relay shares change, with notes to mark changes (e.g. after moving an antenna).
 - [ ] Export to InfluxDB/Grafana.
 - [ ] Device settings, stage 2: region and modem preset (with strong warnings).
 - [x] Replies and emoji reactions from the chat view.

@@ -9,12 +9,12 @@ when its position is rounded, and a line at the preset's decoding limit.
 
 import time
 
-from PySide6.QtCharts import QChart, QChartView, QLineSeries, QScatterSeries, QValueAxis
-from PySide6.QtCore import QMargins, QRectF, Qt, QTimer
+from PySide6.QtCharts import QChart, QChartView, QDateTimeAxis, QLineSeries, QScatterSeries, QValueAxis
+from PySide6.QtCore import QDateTime, QMargins, QRectF, Qt, QTimer
 from PySide6.QtGui import QColor, QCursor, QFont, QPainter, QPen
 from PySide6.QtWidgets import (
-    QAbstractItemView, QComboBox, QHBoxLayout, QHeaderView, QLabel, QSplitter, QStyledItemDelegate,
-    QTableWidget, QTableWidgetItem, QToolTip, QVBoxLayout, QWidget,
+    QAbstractItemView, QComboBox, QGridLayout, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QPushButton,
+    QSplitter, QStyledItemDelegate, QTabWidget, QTableWidget, QTableWidgetItem, QToolTip, QVBoxLayout, QWidget,
 )
 
 from ..coverage import report, station_from_store
@@ -180,6 +180,180 @@ class SnrDistanceChart(QChartView):
                           f"{n['packets']} packets heard directly", self)
 
 
+# Categorical slots 1-3 of the reference palette (validated as a set, light and dark). A relay keeps
+# its slot: the three shown are the all-time top relays, so a range change never repaints one.
+RELAY_COLORS = {"light": ["#2a78d6", "#eb6834", "#1baf7a"], "dark": ["#3987e5", "#d95926", "#199e70"]}
+
+
+def day_start(ts):
+    t = time.localtime(ts)
+    return time.mktime((t.tm_year, t.tm_mon, t.tm_mday, 0, 0, 0, 0, 0, -1))
+
+
+class OverTimeChart(QChartView):
+    """One measure over time: one or more series, markers on each bucket, and note lines."""
+
+    def __init__(self, title, unit, series, notes, colors, series_colors, y_max=None, bucket=86400):
+        """series: [(name, [(t, value)])]; notes: [{"at", "text"}]."""
+        super().__init__()
+        self.setRenderHint(QPainter.Antialiasing)
+        self.setMinimumHeight(220)
+        chart = QChart()
+        chart.setBackgroundBrush(QColor(colors["surface"]))
+        chart.setBackgroundRoundness(4)
+        chart.setMargins(QMargins(4, 4, 8, 4))
+        chart.setTitle(f"{title} ({unit})" if unit else title)
+        font = QFont()
+        font.setBold(True)
+        chart.setTitleFont(font)
+        chart.setTitleBrush(QColor(colors["text"]))
+        legend = chart.legend()
+        legend.setVisible(len(series) > 1)  # one series: the title names it
+        legend.setLabelColor(QColor(colors["text"]))
+        legend.setAlignment(Qt.AlignBottom)
+        x_axis, y_axis = QDateTimeAxis(), QValueAxis()
+        all_t = [t for _, pts in series for t, _ in pts] or [time.time()]
+        all_v = [v for _, pts in series for _, v in pts] or [0]
+        x_axis.setFormat("MMM d" if bucket >= 86400 else "MMM d HH:mm")
+        x_axis.setRange(QDateTime.fromSecsSinceEpoch(int(min(all_t) - 3600)),
+                        QDateTime.fromSecsSinceEpoch(int(max(all_t) + 3600)))
+        x_axis.setTickCount(5)
+        y_axis.setRange(0, y_max if y_max is not None else max(max(all_v) * 1.15, 1))
+        y_axis.applyNiceNumbers()
+        y_axis.setLabelFormat("%.0f")
+        for axis in (x_axis, y_axis):
+            axis.setGridLineColor(QColor(colors["grid"]))
+            axis.setLinePenColor(QColor(colors["axis"]))
+            axis.setLabelsColor(QColor(colors["muted"]))
+        chart.addAxis(x_axis, Qt.AlignBottom)
+        chart.addAxis(y_axis, Qt.AlignLeft)
+        for (name, pts), color in zip(series, series_colors):
+            line, dots = QLineSeries(), QScatterSeries()
+            pen = QPen(QColor(color))
+            pen.setWidthF(2)
+            line.setPen(pen)
+            line.setName(name)
+            dots.setMarkerSize(8)
+            dots.setColor(QColor(color))
+            dots.setBorderColor(QColor(colors["surface"]))
+            for t, v in pts:
+                line.append(t * 1000, v)
+                dots.append(t * 1000, v)
+            for s in (line, dots):
+                chart.addSeries(s)
+                s.attachAxis(x_axis)
+                s.attachAxis(y_axis)
+            chart.legend().markers(dots)[0].setVisible(False)
+        for note in notes:  # a labeled vertical line at each note
+            mark = QLineSeries()
+            mark_pen = QPen(QColor(colors["muted"]))
+            mark_pen.setWidthF(1)
+            mark_pen.setStyle(Qt.DashLine)
+            mark.setPen(mark_pen)
+            mark.append(note["at"] * 1000, y_axis.min())
+            mark.append(note["at"] * 1000, y_axis.max())
+            mark.setPointLabelsFormat(note["text"])
+            chart.addSeries(mark)
+            mark.attachAxis(x_axis)
+            mark.attachAxis(y_axis)
+            chart.legend().markers(mark)[0].setVisible(False)
+            label = QScatterSeries()
+            label.setMarkerSize(0.1)
+            label.setColor(QColor(0, 0, 0, 0))
+            label.setBorderColor(QColor(0, 0, 0, 0))
+            label.append(note["at"] * 1000, y_axis.max() * 0.93)
+            label.setPointLabelsFormat(note["text"])
+            label.setPointLabelsVisible(True)
+            label.setPointLabelsColor(QColor(colors["muted"]))
+            label.setPointLabelsClipping(False)
+            chart.addSeries(label)
+            label.attachAxis(x_axis)
+            label.attachAxis(y_axis)
+            chart.legend().markers(label)[0].setVisible(False)
+        self.setChart(chart)
+
+
+class OverTimeView(QWidget):
+    """Coverage per day (or per 6 hours for short ranges), with notes like "antenna moved"."""
+
+    def __init__(self, tab):
+        super().__init__()
+        self.tab = tab
+        self.store = tab.store
+        add = QPushButton("Add note…")
+        add.setToolTip("Mark a change, e.g. \"antenna moved to the roof\", to compare before and after")
+        add.clicked.connect(self._add_note)
+        remove = QPushButton("Remove a note…")
+        remove.clicked.connect(self._remove_note)
+        top = QHBoxLayout()
+        top.addWidget(add)
+        top.addWidget(remove)
+        top.addStretch(1)
+        self.grid = QGridLayout()
+        layout = QVBoxLayout(self)
+        layout.addLayout(top)
+        layout.addLayout(self.grid, 1)
+
+    def notes(self):
+        return self.store.station("coverage_notes") or []
+
+    def _add_note(self):
+        text, ok = QInputDialog.getText(self, "Coverage note", "What changed now? (e.g. antenna moved to the roof)")
+        if ok and text.strip():
+            self.store.set_station("coverage_notes", self.notes() + [{"at": time.time(), "text": text.strip()[:40]}])
+            self.tab.refresh(force=True)
+
+    def _remove_note(self):
+        notes = self.notes()
+        if not notes:
+            return
+        labels = [f"{time.strftime('%b %-d %H:%M', time.localtime(n['at']))}: {n['text']}" for n in notes]
+        choice, ok = QInputDialog.getItem(self, "Remove note", "Note", labels, 0, False)
+        if ok:
+            self.store.set_station("coverage_notes", [n for n, l in zip(notes, labels) if l != choice])
+            self.tab.refresh(force=True)
+
+    def update_view(self, span, colors, dark):
+        while self.grid.count():
+            item = self.grid.takeAt(0)
+            if item.widget():
+                # Detach now (Python then frees it); deleteLater alone would leave it until the next event loop.
+                item.widget().setParent(None)
+        now = time.time()
+        first = self.store._query("SELECT MIN(logged_at) AS t FROM packets WHERE is_local = 0")[0]["t"] or now
+        since = max(now - span, first) if span else first
+        bucket = 6 * 3600 if now - since <= 3 * 86400 else 86400
+        since = day_start(since)
+        rows = self.store.coverage_over_time(since, bucket)
+        if not rows:
+            self.grid.addWidget(QLabel("Nothing logged in this range yet."), 0, 0)
+            return
+        mid = [(r["start"] + bucket / 2, r) for r in rows]
+        direct = [(t, 100 * r["direct"] / r["heard"]) for t, r in mid if r["heard"]]
+        neighbors = [(t, r["neighbors"]) for t, r in mid]
+        top = self.store.coverage(0)["relays"]
+        top = [int(b) for b, _ in sorted(top.items(), key=lambda kv: -kv[1])[:3]]
+        nodes = {n["num"]: n for n in self.store.nodes()}
+        direct_nums = set(self.store.coverage(0)["direct"])
+        from ..coverage import relay_candidates
+        relay_series = []
+        for byte in top:
+            cands = relay_candidates(byte, direct_nums, nodes)
+            name = (nodes[cands[0]]["short_name"] or f"!{cands[0]:08x}") if len(cands) == 1 else f"ID ends 0x{byte:02x}"
+            relay_series.append((f"via {name}", [(t, 100 * r["relays"].get(byte, 0) / r["heard"]) for t, r in mid if r["heard"]]))
+        notes = [n for n in self.notes() if n["at"] >= since]
+        palette = RELAY_COLORS["dark" if dark else "light"]
+        per = "per 6 hours" if bucket < 86400 else "per day"
+        self.grid.addWidget(OverTimeChart(f"Heard directly, {per}", "% of packets", [("heard directly", direct)], notes,
+                                          colors, [colors["series"]], y_max=max(10, max(v for _, v in direct) * 1.3),
+                                          bucket=bucket), 0, 0)
+        self.grid.addWidget(OverTimeChart(f"Nodes heard directly, {per}", "", [("nodes", neighbors)], notes, colors,
+                                          [colors["series"]], bucket=bucket), 0, 1)
+        if relay_series:
+            self.grid.addWidget(OverTimeChart(f"Share of packets through each top relay, {per}", "%", relay_series,
+                                              notes, colors, palette, y_max=100, bucket=bucket), 1, 0, 1, 2)
+
+
 class CoverageTab(QWidget):
     NEIGHBOR_COLUMNS = ["Node", "Distance", "Bearing", "Packets", "Median SNR", "Best", "Worst", "Margin",
                         "Last direct"]
@@ -230,10 +404,16 @@ class CoverageTab(QWidget):
             box_layout.addWidget(table)
             tables.addWidget(box)
         tables.setSizes([640, 420])
+        self.over_time = OverTimeView(self)
+        self.views = QTabWidget()
+        self.views.addTab(self.chart, "SNR against distance")
+        self.views.addTab(self.over_time, "Over time")
+        self.views.setCurrentIndex(int(win.settings.value("coverage/view", 0)))
+        self.views.currentChanged.connect(lambda i: (win.settings.setValue("coverage/view", i), self.refresh(force=True)))
         body = QSplitter(Qt.Vertical)
         body.addWidget(tables)
-        body.addWidget(self.chart)
-        body.setSizes([300, 320])
+        body.addWidget(self.views)
+        body.setSizes([280, 420])
 
         layout = QVBoxLayout(self)
         layout.addLayout(top)
@@ -327,3 +507,5 @@ class CoverageTab(QWidget):
                 self.sources.setItem(r, c, item)
 
         self.chart.update_chart(rep, DARK if is_dark(self) else LIGHT)
+        if self.views.currentWidget() is self.over_time:
+            self.over_time.update_view(self.range_box.currentData(), DARK if is_dark(self) else LIGHT, is_dark(self))

@@ -112,3 +112,47 @@ def test_coverage_tab(store, tmp_path):
         assert "2</b> packets" in tab.summary.text() or "Heard <b>2</b>" in tab.summary.text()
     finally:
         win.close()
+
+
+def test_coverage_over_time(store):
+    import time as _time
+    day = 86400
+    start = _time.mktime((2026, 9, 20, 0, 0, 0, 0, 0, -1))
+    packet(store, 1, NEAR, -6.0)  # direct
+    store._conn.execute("UPDATE packets SET logged_at = ?", (start + 3600,))
+    store._conn.commit()
+    for i in range(3):
+        store.record_packet({"from": 0x5555, "to": BROADCAST_NUM, "id": 10 + i, "rxSnr": -9.0, "hopStart": 3,
+                             "hopLimit": 1, "relayNode": 0x90, "decoded": {"portnum": "POSITION_APP"}}, now=start + day + i)
+    rows = store.coverage_over_time(start, day)
+    assert [(r["heard"], r["direct"], r["neighbors"], r["relays"]) for r in rows] == [(1, 1, 1, {}), (3, 0, 0, {0x90: 3})]
+    assert rows[1]["start"] == start + day
+
+
+def test_over_time_view_and_notes(store, tmp_path):
+    pytest.importorskip("PySide6")
+    import os
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+
+    from meshshack.gui.app import MainWindow
+    from meshshack.gui.coverage import OverTimeChart
+
+    app = QApplication.instance() or QApplication([])
+    packet(store, 1, NEAR, -6.0)
+    packet(store, 2, 0x5555, -12.0, hop_start=3, hop_limit=1, relay=0x90)
+    store.set_station("coverage_notes", [{"at": __import__("time").time() - 60, "text": "antenna up"}])
+    win = MainWindow(tmp_path / "test.db")
+    try:
+        win.show()
+        win.tabs.setCurrentWidget(win.coverage)
+        win.coverage.views.setCurrentWidget(win.coverage.over_time)
+        app.processEvents()
+        charts = win.coverage.over_time.findChildren(OverTimeChart)
+        titles = sorted(c.chart().title() for c in charts)
+        assert len(charts) == 3 and titles[0].startswith("Heard directly")
+        relay_chart = next(c for c in charts if "relay" in c.chart().title())
+        names = [s.name() for s in relay_chart.chart().series() if s.name()]
+        assert names == ["via !0a0b0c90"]  # the relay, identified (it has no short name in this test)
+    finally:
+        win.close()

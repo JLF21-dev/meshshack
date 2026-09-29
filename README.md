@@ -197,6 +197,12 @@ crash's stack trace goes to `gui-crash.log` beside it.
   - **SNR against distance** for direct neighbors: the median SNR, a bar for
     the best-to-worst spread, a dashed bar for the distance range of a
     rounded position, and a line at the decoding limit.
+  - **Over time** (next to that chart): per day, or per 6 hours for short
+    ranges, the share of packets heard directly, how many nodes are heard
+    directly, and each top relay's share of your traffic (each relay keeps
+    its color). **Add note…** marks a change such as "antenna moved to the
+    roof" as a labeled line on every chart, so before and after are easy to
+    compare.
   - On the **Map**, "Direct links" draws a line to each direct neighbor.
   The same report is `meshshack coverage` and `GET /api/coverage`.
 - **Alerts:** possible emergencies. The logger checks every message it

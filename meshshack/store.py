@@ -1032,6 +1032,30 @@ class Store:
         totals["direct"] = sum(len(d["snrs"]) for d in direct.values())
         return {"direct": direct, "relays": relays, "totals": totals}
 
+    def coverage_over_time(self, since, bucket):
+        """Per time bucket (seconds wide, starting at `since`): packets heard, packets heard
+        directly, distinct direct neighbors, and packets per relay byte. For "did moving the
+        antenna help?". Returns [{"start", "heard", "direct", "neighbors", "relays": {byte: n}}]."""
+        rows = self._query(
+            f"""SELECT CAST((logged_at - ?) / ? AS INTEGER) AS b, COUNT(*) AS heard,
+                       SUM(CASE WHEN {DIRECT_SQL} THEN 1 ELSE 0 END) AS direct,
+                       COUNT(DISTINCT CASE WHEN {DIRECT_SQL} THEN from_num END) AS neighbors
+                FROM packets p WHERE logged_at >= ? AND is_local = 0 GROUP BY b ORDER BY b""",
+            (since, bucket, since),
+        )
+        relays = {}
+        for r in self._query(
+            """SELECT CAST((logged_at - ?) / ? AS INTEGER) AS b, json_extract(json, '$.relayNode') AS relay,
+                      COUNT(*) AS c FROM packets
+               WHERE logged_at >= ? AND is_local = 0 AND COALESCE(via_mqtt, 0) = 0
+                 AND hop_start IS NOT NULL AND hop_start > hop_limit AND json_extract(json, '$.relayNode') IS NOT NULL
+               GROUP BY b, relay""",
+            (since, bucket, since),
+        ):
+            relays.setdefault(r["b"], {})[int(r["relay"])] = r["c"]
+        return [{"start": since + r["b"] * bucket, "heard": r["heard"], "direct": r["direct"],
+                 "neighbors": r["neighbors"], "relays": relays.get(r["b"], {})} for r in rows]
+
     def node_summary(self, num):
         """Packet counts by type, message count, and the latest traceroute for the detail panel."""
         by_type = self._query(

@@ -268,7 +268,8 @@ class NodeCharts(QWidget):
         while self.grid.count():
             item = self.grid.takeAt(0)
             if item.widget():
-                item.widget().deleteLater()
+                # Detach now (Python then frees it); deleteLater alone would leave it until the next event loop.
+                item.widget().setParent(None)
         if self.num is None:
             self.empty.setText(self.empty_text)
             self.note.setText("")
