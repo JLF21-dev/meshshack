@@ -131,6 +131,24 @@ CREATE TABLE IF NOT EXISTS api_tokens (
     revoked_at       REAL
 );
 
+-- Possible emergencies the logger noticed (see alerts.py). Nothing is ever sent in response.
+CREATE TABLE IF NOT EXISTS alerts (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    at               REAL NOT NULL,
+    packet_row       INTEGER REFERENCES packets (id),
+    packet_id        INTEGER,
+    from_num         INTEGER,
+    to_num           INTEGER,
+    channel          INTEGER,
+    portnum          TEXT,
+    reason           TEXT NOT NULL,
+    text             TEXT,
+    via_mqtt         INTEGER NOT NULL DEFAULT 0,
+    loud             INTEGER NOT NULL DEFAULT 1,   -- the app sounds an alarm for it
+    acknowledged_at  REAL
+);
+CREATE INDEX IF NOT EXISTS alerts_open ON alerts (acknowledged_at, loud);
+
 -- Small facts about this station that the radio doesn't hand back, e.g. the exact fixed
 -- position (the radio only reports it rounded to the channel's position precision).
 CREATE TABLE IF NOT EXISTS station (
@@ -412,7 +430,10 @@ class Store:
 
             self._resolve_request(decoded, portnum, row, now)
 
-            if portnum == "TEXT_MESSAGE_APP":
+            if portnum in ("TEXT_MESSAGE_APP", "ALERT_APP"):
+                text = decoded.get("text")
+                if text is None and isinstance(decoded.get("payload"), (bytes, bytearray)):
+                    text = bytes(decoded["payload"]).decode("utf-8", errors="replace")  # ALERT_APP isn't decoded
                 self._conn.execute(
                     """INSERT INTO messages (packet_row, logged_at, packet_id, from_num, from_id,
                            to_num, to_id, channel, is_direct, text, reply_id, emoji)
@@ -427,7 +448,7 @@ class Store:
                         packet.get("toId"),
                         channel,
                         int(to_num is not None and to_num != BROADCAST_NUM),
-                        decoded.get("text"),
+                        text,
                         decoded.get("replyId"),
                         decoded.get("emoji"),
                     ),
@@ -525,6 +546,43 @@ class Store:
         fields = {k: int(v) for k, v in (("is_favorite", favorite), ("is_ignored", ignored)) if v is not None}
         with self._lock, self._conn:
             self._upsert_node(num, time.time(), **fields)
+
+    def record_alert(self, alert):
+        with self._lock, self._conn:
+            return self._conn.execute(
+                """INSERT INTO alerts (at, packet_row, packet_id, from_num, to_num, channel, portnum, reason, text,
+                       via_mqtt, loud) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (alert["at"], alert["packet_row"], alert["packet_id"], alert["from_num"], alert["to_num"],
+                 alert["channel"], alert["portnum"], alert["reason"], alert["text"], int(alert["via_mqtt"]),
+                 int(alert["loud"])),
+            ).lastrowid
+
+    def alerts(self, limit=200, open_only=False, loud_only=False):
+        """Newest first, with the sender's names."""
+        where = ["1"]
+        if open_only:
+            where.append("a.acknowledged_at IS NULL")
+        if loud_only:
+            where.append("a.loud = 1")
+        return self._query(
+            f"""SELECT a.*, n.short_name AS from_short, n.long_name AS from_long, n.node_id AS from_id,
+                       p.rx_snr, p.hop_start - p.hop_limit AS hops
+                FROM alerts a LEFT JOIN nodes n ON n.num = a.from_num LEFT JOIN packets p ON p.id = a.packet_row
+                WHERE {' AND '.join(where)} ORDER BY a.id DESC LIMIT ?""",
+            (limit,),
+        )
+
+    def acknowledge_alerts(self, ids=None, now=None):
+        """Acknowledge the given alert ids, or every open alert. Returns how many changed."""
+        with self._lock, self._conn:
+            if ids is None:
+                cur = self._conn.execute("UPDATE alerts SET acknowledged_at = ? WHERE acknowledged_at IS NULL",
+                                         (now or time.time(),))
+            else:
+                cur = self._conn.executemany(
+                    "UPDATE alerts SET acknowledged_at = ? WHERE id = ? AND acknowledged_at IS NULL",
+                    [(now or time.time(), i) for i in ids])
+            return cur.rowcount
 
     def mark_local(self, my_num):
         """Tag this station's own packets, including ones logged before local tagging existed."""
@@ -717,7 +775,8 @@ class Store:
             where, params = "m.is_direct = 0 AND m.channel = ?", [channel or 0]
         rows = self._query(
             f"""SELECT m.*, n.short_name AS from_short, n.long_name AS from_long,
-                       p.rx_snr, p.rx_rssi, p.hop_start - p.hop_limit AS hops, p.via_mqtt
+                       p.rx_snr, p.rx_rssi, p.hop_start - p.hop_limit AS hops, p.via_mqtt, p.portnum,
+                       (SELECT reason FROM alerts a WHERE a.packet_row = m.packet_row LIMIT 1) AS alert_reason
                 FROM messages m
                 LEFT JOIN nodes n ON n.num = m.from_num
                 LEFT JOIN packets p ON p.id = m.packet_row

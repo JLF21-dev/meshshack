@@ -94,6 +94,12 @@ for i in range(8):
                          "rxRssi": -110, "hopStart": 3, "hopLimit": 3, "decoded": {"portnum": "POSITION_APP"}},
                         now=now - random.uniform(0, 86000))
 
+# An emergency, as the logger would have detected it (the demo plays no alarm).
+from meshshack import alerts
+sos = {"from": 0x33333333, "to": BROADCAST_NUM, "id": 43000, "channel": 0, "rxSnr": -6.5, "rxRssi": -112, "hopStart": 3,
+       "hopLimit": 2, "decoded": {"portnum": "TEXT_MESSAGE_APP", "text": "SOS - rolled my ankle at the trailhead, need a ride"}}
+alerts.check(store, sos, store.record_packet(sos, now=now - 120), now=now - 120)
+
 iface = FakeInterface()
 iface.localNode.localConfig.device.role = 12  # CLIENT_BASE
 iface.localNode.localConfig.position.position_broadcast_secs = 900
@@ -107,12 +113,14 @@ from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 from meshshack.gui.app import MainWindow
 app = QApplication([])
-win = MainWindow(db); win.resize(1200, 820); win.show()
+win = MainWindow(db); win.resize(1200, 820)
+win.settings.setValue("alerts/sound", "false"); win.settings.setValue("alerts/raise", "false")
+win.show()
 steps = []
 def shot(name):
     win.grab().save(str(out / f"gui_{name}.png")); print("saved", name)
 def seq(i=0):
-    plan = [(0, "chat"), (1, "map"), (2, "nodes"), (3, "coverage"), (4, "channels"), (5, "device")]
+    plan = [(0, "chat"), (1, "map"), (2, "nodes"), (3, "coverage"), (4, "channels"), (5, "alerts"), (6, "device")]
     if i < len(plan):
         idx, name = plan[i]
         win.tabs.setCurrentIndex(idx)

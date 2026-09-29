@@ -12,12 +12,13 @@ from PySide6.QtWebEngineWidgets import QWebEngineView  # noqa: F401
 from PySide6.QtCore import QEvent, QSettings, QTimer, QtMsgType, Signal, qInstallMessageHandler
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import (
-    QApplication, QLabel, QMainWindow, QMessageBox, QPushButton, QSystemTrayIcon, QTabWidget,
+    QApplication, QLabel, QMainWindow, QMessageBox, QPushButton, QSystemTrayIcon, QTabWidget, QVBoxLayout, QWidget,
 )
 
 from ..airtime import Gatekeeper
 from ..store import Store
 from .activity import KIND_LABELS, ActivityTracker
+from .alerts import AlertCenter, AlertsTab
 from .channels import ChannelsTab
 from .coverage import CoverageTab
 from .chat import ChatTab
@@ -54,14 +55,25 @@ class MainWindow(QMainWindow):
         self.nodes = NodesTab(self)
         self.coverage = CoverageTab(self)
         self.channels = ChannelsTab(self)
+        self.alerts_tab = AlertsTab(self)
         self.device = DeviceTab(self)
         self.tabs.addTab(self.chat, "Chat")
         self.tabs.addTab(self.map, "Map")
         self.tabs.addTab(self.nodes, "Nodes")
         self.tabs.addTab(self.coverage, "Coverage")
         self.tabs.addTab(self.channels, "Channels")
+        self.tabs.addTab(self.alerts_tab, "Alerts")
         self.tabs.addTab(self.device, "Device")
-        self.setCentralWidget(self.tabs)
+        # The emergency banner sits above the tabs, so it shows whichever tab is open.
+        self.alert_center = AlertCenter(self)
+        central = QWidget()
+        central_layout = QVBoxLayout(central)
+        central_layout.setContentsMargins(0, 0, 0, 0)
+        central_layout.setSpacing(0)
+        central_layout.addWidget(self.alert_center)
+        central_layout.addWidget(self.tabs, 1)
+        self.setCentralWidget(central)
+        QTimer.singleShot(0, self.alert_center.check)
         self.chat.unreadChanged.connect(self._show_unread)
 
         self.connection_label = QLabel()

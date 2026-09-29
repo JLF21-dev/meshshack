@@ -25,6 +25,9 @@ a kill switch.
 - **Coverage analysis:** who you hear directly (distance, bearing, SNR, link
   margin), and which relays bring you everything else, from what's already
   logged. Useful for siting a node.
+- **Emergency alerts:** SOS, MAYDAY and other keywords, Meshtastic alert
+  messages and the alert bell raise a banner, an alarm and a notification
+  (detected by the logger, even while the app is closed). Nothing is sent.
 - **Export:** nodes (CSV/KML), messages and telemetry (CSV), position history (GPX).
 
 Status: 0.1, in daily use on a Heltec V4 (firmware 2.7) on Linux. Plans and the
@@ -87,6 +90,7 @@ appears, try another USB cable, since many are power-only.
 .venv/bin/meshshack stats --since 7d        # packet counts by type
 .venv/bin/meshshack events                  # connect/disconnect history
 .venv/bin/meshshack coverage --since 7d  # direct neighbors and where traffic comes from
+.venv/bin/meshshack alerts               # open emergency alerts (--all for history; ack ID|all)
 .venv/bin/meshshack export nodes -f kml -o nodes.kml          # also csv
 .venv/bin/meshshack export positions --since 7d -o tracks.gpx
 .venv/bin/meshshack export messages -o messages.csv           # telemetry too
@@ -191,6 +195,23 @@ crash's stack trace goes to `gui-crash.log` beside it.
     rounded position, and a line at the decoding limit.
   - On the **Map**, "Direct links" draws a line to each direct neighbor.
   The same report is `meshshack coverage` and `GET /api/coverage`.
+- **Alerts:** possible emergencies. The logger checks every message it
+  hears, so it works while the app is closed, and flags:
+  - Meshtastic **alert messages** (the ALERT_APP message type);
+  - the **alert bell** (the BEL character the Meshtastic apps' alert
+    button sends);
+  - **keywords**, as whole words in any case (SOS, MAYDAY, EMERGENCY,
+    HELP ME and 911 by default; editable);
+  - optionally, detection-sensor messages (off by default).
+
+  A flagged message shows a red banner above every tab (*Open
+  conversation*, *Acknowledge*, *Mute sound*), plays an alarm until it's
+  acknowledged, brings the window to the front, pops up a notification,
+  and puts a warning on the tray icon. The message itself is marked in
+  chat. Alerts heard only via MQTT are recorded quietly unless you turn
+  them on. **Test alert** checks the banner and sound. MeshShack never
+  sends anything in response. `meshshack alerts` lists them
+  (`meshshack alerts ack all`).
 - **Channels:** your radio's channels, with encryption (default public key,
   private AES-128/256 key, or none) and position sharing. Add a private
   channel with a fresh random key, edit a secondary channel, delete one, or
@@ -291,13 +312,15 @@ airtime gatekeeper with its own budget (see [Airtime](#airtime)).
 | `GET /api/positions?since=&node=` | read | Position history |
 | `GET /api/requests` | read | Traceroutes and requests, with replies |
 | `GET /api/coverage?since=` | read | Direct neighbors (distance, bearing, SNR, margin) and traffic sources |
+| `GET /api/alerts?open=1` | read | Emergency alerts (also streamed as `alert` events) |
 | `GET /api/tx` | read | Transmit switch and recent send decisions |
-| `GET /api/events` | read | Live stream (server-sent events): `packet`, `message`, `connection` |
+| `GET /api/events` | read | Live stream (server-sent events): `packet`, `message`, `alert`, `connection` |
 | `POST /api/send` `{text, to \| channel}` | send | Direct message, or a channel broadcast if the token allows broadcasts |
 | `POST /api/traceroute` `{to}` | send | Traceroute (spaced 3 min apart; a node at most every 3 h) |
 | `POST /api/request` `{to, what}` | send | Ask a node for `position`, `telemetry` or `nodeinfo` |
 | `POST /api/announce` | send | Broadcast this node's info (needs broadcast permission) |
 | `POST /api/tx`, `/api/reboot`, `/api/config/*` | app only | Kill switch, reboot, owner/role/position |
+| `POST /api/alerts/ack` `{ids \| all}` | app only | Acknowledge alerts |
 
 `since` takes a unix time or a duration like `30m`, `24h`, `7d`; `limit`
 caps rows (at most 1000). Nodes can be given as `!a1b2c3d4` or a number.

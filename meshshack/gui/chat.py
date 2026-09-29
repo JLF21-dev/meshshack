@@ -338,6 +338,9 @@ class ChatTab(QWidget):
                               f" · <a href='react:{m['packet_id']}' {link}>React</a>")
             meta_html += "</span>"
 
+            if m["alert_reason"] or m["portnum"] == "ALERT_APP":  # flagged as a possible emergency
+                label = escape(m["alert_reason"] or "Alert message")
+                text = f"<b style='color:{new_color}'>🚨 {label}</b><br>{text}"
             quote = ""
             if m["reply_id"]:
                 target = by_packet.get(m["reply_id"])

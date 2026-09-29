@@ -53,9 +53,9 @@ Picked up when work resumes. The ground rule above applies to every item.
   random timing jitter, and is sent through the gatekeeper (each job at most
   every 6 h, 4 automated sends a day in total, paused above 20% channel
   utilization). No auto-replies to incoming messages.
-- [ ] Emergency detection: flag SOS/MAYDAY keywords and alert-bell messages
-  with a loud local alert and tray notification (no airtime). Anything that
-  would transmit in response needs a human to confirm it.
+- [x] Emergency detection: SOS/MAYDAY and other keywords, alert messages and the
+  alert bell raise a loud local alert and tray notification (no airtime). Anything
+  that would transmit in response needs a human to confirm it.
 
 **Automation design (roadmap step 5)**
 

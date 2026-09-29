@@ -6,6 +6,7 @@ import meshtastic.serial_interface
 import meshtastic.util
 from pubsub import pub
 
+from . import alerts
 from .events import packet_event
 from .store import hops_taken
 
@@ -111,6 +112,11 @@ class Collector:
             log.info(self.describe(packet))
             for event in packet_event(packet, row, local):
                 self._publish(event)
+            alert = alerts.check(self.store, packet, row, local)
+            if alert is not None:
+                log.warning("ALERT (%s) from %s: %s", alert["reason"], self.store.node_label(alert["from_num"]),
+                            alert["text"])
+                self._publish({"type": "alert", **alert})
         except Exception:
             log.exception("Failed to record packet")
 

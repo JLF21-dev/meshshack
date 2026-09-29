@@ -661,6 +661,14 @@ def _routes(radio):
             station = (pos["latitude"], pos["longitude"], None)
         return report(store, station, (status.get("lora") or {}).get("modem_preset"), since=q.since() or 0)
 
+    def ack_alerts(c, b, q):
+        ids = b.get("ids")
+        if ids is None and b.get("all") is not True:
+            raise ApiError(400, "give ids (a list) or all: true")
+        if ids is not None and (not isinstance(ids, list) or not all(isinstance(i, int) for i in ids)):
+            raise ApiError(400, "ids must be a list of alert ids")
+        return {"acknowledged": store.acknowledge_alerts(ids)}
+
     def send(c, b, q):
         args = body_args(b, "text", optional=("channel", "to", "reply_id", "emoji"))
         return radio.send_text(**args, source=c.source, allow_broadcast=c.allow_broadcast)
@@ -677,6 +685,9 @@ def _routes(radio):
         ("GET", "/api/positions"): ("read", lambda c, b, q: {"positions": _rows(
             store.positions(limit=q.limit(500), since=q.since(), from_num=q.node()))}),
         ("GET", "/api/coverage"): ("read", coverage),
+        ("GET", "/api/alerts"): ("read", lambda c, b, q: {"alerts": _rows(
+            store.alerts(limit=q.limit(), open_only=q.str("open") in ("1", "true")))}),
+        ("POST", "/api/alerts/ack"): ("owner", ack_alerts),
         ("GET", "/api/requests"): ("read", lambda c, b, q: {"requests": _rows(
             store.requests(limit=q.limit()), parse=("response_json",))}),
         ("GET", "/api/tx"): ("read", lambda c, b, q: radio.tx_status(limit=q.limit(20))),

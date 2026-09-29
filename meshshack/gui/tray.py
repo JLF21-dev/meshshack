@@ -7,8 +7,8 @@ transmitting is switched off, and grey when the radio isn't connected.
 
 from pathlib import Path
 
-from PySide6.QtCore import QRectF, Qt
-from PySide6.QtGui import QAction, QColor, QFont, QIcon, QPainter
+from PySide6.QtCore import QPointF, QRectF, Qt
+from PySide6.QtGui import QAction, QColor, QFont, QIcon, QPainter, QPen, QPolygonF
 from PySide6.QtWidgets import QMenu, QSystemTrayIcon
 
 ICON_PATH = Path(__file__).parent / "assets" / "icon.svg"
@@ -19,7 +19,7 @@ def app_icon():
     return QIcon(str(ICON_PATH))
 
 
-def state_icon(unread=0, transmit_on=True, connected=True):
+def state_icon(unread=0, transmit_on=True, connected=True, alert=False):
     """The app icon with state drawn on top: grey when disconnected, a red bar when transmit
     is off, and a badge with the unread count."""
     pixmap = app_icon().pixmap(SIZE, SIZE)
@@ -33,6 +33,16 @@ def state_icon(unread=0, transmit_on=True, connected=True):
         painter.setPen(Qt.NoPen)
         painter.setBrush(QColor("#d93025"))
         painter.drawRoundedRect(QRectF(4, SIZE - 18, SIZE - 8, 14), 5, 5)
+    if alert:  # an open emergency alert: a warning triangle in the bottom-left corner
+        painter.setPen(QPen(QColor("#3c2f00"), 2))
+        painter.setBrush(QColor("#fbbc04"))
+        painter.drawPolygon(QPolygonF([QPointF(2, SIZE - 2), QPointF(20, SIZE - 34), QPointF(38, SIZE - 2)]))
+        font = QFont()
+        font.setBold(True)
+        font.setPixelSize(22)
+        painter.setFont(font)
+        painter.setPen(QColor("#3c2f00"))
+        painter.drawText(QRectF(2, SIZE - 30, 36, 28), Qt.AlignCenter, "!")
     if unread:
         text = str(unread) if unread < 100 else "99+"
         diameter = 30 if len(text) < 3 else 36
@@ -103,7 +113,9 @@ class Tray(QSystemTrayIcon):
         transmit_on = self.win.gate.transmit_enabled()
         connected = self.win.radio_ready
         unread = self._last_unread or 0
-        self.setIcon(state_icon(unread, transmit_on, connected))
+        center = getattr(self.win, "alert_center", None)
+        alert = center is not None and center.current is not None
+        self.setIcon(state_icon(unread, transmit_on, connected, alert))
         self.transmit_action.setChecked(transmit_on)
         self.transmit_action.setText("Transmit on" if transmit_on else "Transmit OFF (click to turn on)")
         node = (self.win.status.get("node") or {}).get("long_name")
@@ -112,4 +124,6 @@ class Tray(QSystemTrayIcon):
                  "Transmitting" if transmit_on else "Transmit is OFF"]
         if unread:
             lines.append(f"{unread} unread")
+        if alert:
+            lines.insert(1, "⚠ Possible emergency: open the app")
         self.setToolTip("\n".join(lines))

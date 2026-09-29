@@ -273,6 +273,25 @@ def cmd_coverage(args, store):
                 [[s["label"], s["packets"], f"{s['share']:.1%}"] for s in rep["sources"]])
 
 
+def cmd_alerts(args, store):
+    if args.action == "ack":
+        if not args.ids:
+            sys.exit("usage: meshshack alerts ack ID [ID ...] | all")
+        ids = None if args.ids == ["all"] else [int(i) for i in args.ids]
+        print(f"Acknowledged {store.acknowledge_alerts(ids)} alert(s).")
+        return
+    rows = list(reversed(store.alerts(limit=args.limit, open_only=not args.all)))
+    if not rows:
+        print("No open alerts." if not args.all else "No alerts.")
+        return
+    print_table(
+        ["id", "time", "from", "reason", "via", "text", "status"],
+        [[a["id"], fmt_time(a["at"]), (a["from_short"] or a["from_id"] or ""), a["reason"],
+          "MQTT" if a["via_mqtt"] else "radio", a["text"],
+          f"acknowledged {fmt_ago(a['acknowledged_at'])}" if a["acknowledged_at"] else "OPEN"] for a in rows],
+    )
+
+
 def build_parser():
     parser = argparse.ArgumentParser(prog="meshshack", description="MeshShack: log, monitor, and control a Meshtastic radio.")
     parser.add_argument("--db", type=Path, default=DEFAULT_DB, help=f"database path (default: {DEFAULT_DB})")
@@ -343,6 +362,13 @@ def build_parser():
                                         "which relays bring you the rest")
     p.add_argument("--since", type=parse_since, help=since_help)
     p.set_defaults(func=cmd_coverage)
+
+    p = sub.add_parser("alerts", help="possible emergencies the logger noticed (SOS, MAYDAY, alert messages...)")
+    p.add_argument("action", nargs="?", choices=["list", "ack"], default="list")
+    p.add_argument("ids", nargs="*", help="with ack: alert ids, or 'all'")
+    p.add_argument("--all", action="store_true", help="include acknowledged alerts")
+    p.add_argument("-n", "--limit", type=int, default=50)
+    p.set_defaults(func=cmd_alerts)
 
     p = sub.add_parser("stats", help="packet counts by type")
     p.add_argument("--since", type=parse_since, help=since_help)
