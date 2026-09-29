@@ -92,8 +92,7 @@ in at send time from data sources, including external APIs. Proposed shape:
 **Deferred from the API (roadmap step 3)**
 - [ ] Optional output to a local MQTT broker (Home Assistant and similar),
   kept separate from the mesh; it never feeds back into it.
-- [ ] Manage API tokens from the app (the command line only for now:
-  `meshshack token`).
+- [x] Manage API tokens from the app (Device tab), as well as `meshshack token`.
 - [ ] A radio layer ready for MeshCore support.
 - [ ] A formal API description (OpenAPI).
 

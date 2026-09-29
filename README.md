@@ -265,6 +265,9 @@ crash's stack trace goes to `gui-crash.log` beside it.
   precisely your location is shared (e.g. 13 bits is about a 5.8 × 4.4 km
   area; 0 shares none). Keys are only shown to the app itself, never to API
   tokens, and every change is a config write through the gatekeeper.
+- **Device:** **Other apps (API tokens)** lists the tokens other apps use,
+  with what each can do and when it was last used; create one (shown once,
+  with a copy button) or revoke it. Same as `meshshack token`.
 - **Device:** at the bottom, **this station's history**: your radio reports
   channel utilization, transmit airtime, battery and voltage about once a
   minute, so you can watch how busy the mesh is around you (with the 25%

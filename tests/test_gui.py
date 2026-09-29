@@ -389,3 +389,23 @@ def test_reaction_to_a_message_elsewhere_quotes_it(store, qapp, tmp_path):
         assert "RLY 👍 reacted to DST: “net check-in at 8”" in win.chat.view.toPlainText()
     finally:
         win.close()
+
+
+def test_token_management_in_the_app(store, qapp, tmp_path):
+    from meshshack.gui.tokens import NewTokenDialog
+
+    win = MainWindow(tmp_path / "test.db")
+    try:
+        group = win.device.tokens
+        dialog = NewTokenDialog(group, store)
+        dialog.name.setText("weather-display")
+        dialog.send.setChecked(True)
+        dialog._create()
+        assert dialog.token.startswith("mst_") and store.token_for(dialog.token)["scopes"] == "read,send"
+        group.refresh()
+        assert group.table.item(0, 1).text() == "read, send" and group.table.item(0, 4).text() == "active"
+        store.revoke_token("weather-display")
+        group.refresh()
+        assert group.table.item(0, 4).text() == "revoked" and store.token_for(dialog.token) is None
+    finally:
+        win.close()
