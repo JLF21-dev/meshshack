@@ -403,16 +403,24 @@ class RadiosGroup(QGroupBox):
         self.message = QLabel()
         self.message.setWordWrap(True)
 
+        self.meshcore_status = QLabel()
+        self.meshcore_status.setWordWrap(True)
+        self.meshcore_status.setTextInteractionFlags(Qt.TextSelectableByMouse)
+
         layout = QVBoxLayout(self)
         layout.addWidget(note)
         layout.addWidget(self.table)
         layout.addLayout(buttons)
         layout.addWidget(self.message)
+        layout.addWidget(self.meshcore_status)
         win.statusChanged.connect(self._status_changed)
         self._status_changed(win.status)
 
     def _status_changed(self, status):
-        key = (bool(status.get("connected")), status.get("hardware_id"), bool(status.get("hub_error")))
+        mc = status.get("meshcore") or {}
+        key = (bool(status.get("connected")), status.get("hardware_id"), bool(status.get("hub_error")),
+               mc.get("connected"), mc.get("hardware_id"))
+        self._show_meshcore(mc, status.get("hub_error"))
         if key != self._seen:
             self._seen = key
             self.refresh()
@@ -420,6 +428,23 @@ class RadiosGroup(QGroupBox):
 
     def refresh(self):
         self.win.hub.get("/api/radios", self._loaded)
+
+    def _show_meshcore(self, mc, hub_error):
+        if hub_error:
+            self.meshcore_status.setText("")
+        elif mc.get("connected"):
+            r = mc.get("radio") or {}
+            channels = ", ".join(c["name"] for c in mc.get("channels", [])) or "none"
+            self.meshcore_status.setText(
+                f"<b>MeshCore radio</b>: {escape(str(r.get('name')))} on {escape(str(mc.get('port')))} · "
+                f"{escape(str(r.get('model')))}, {escape(str(r.get('firmware')))} · {r.get('freq_mhz')} MHz, "
+                f"{r.get('bw_khz')} kHz, SF{r.get('sf')} · channels: {escape(channels)} · "
+                "<i>receive only: MeshShack never transmits through it</i>")
+        elif mc.get("linked"):
+            self.meshcore_status.setText("<b>MeshCore radio</b>: linked but not connected; the logger keeps trying.")
+        else:
+            self.meshcore_status.setText("<b>MeshCore radio</b>: none linked. To log MeshCore too, scan, select "
+                                         "the MeshCore radio and link it as MeshCore.")
 
     def scan(self):
         self.scan_button.setEnabled(False)
@@ -450,6 +475,8 @@ class RadiosGroup(QGroupBox):
         self._update_buttons()
 
     def _answers_as(self, r):
+        if r.get("connected_as"):
+            return f"{self.kinds[r['connected_as']]} (connected now)"
         if r.get("connected"):
             return "Meshtastic (connected now)"
         if r.get("in_use"):

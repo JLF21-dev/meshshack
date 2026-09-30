@@ -22,6 +22,12 @@ SELF_INFO = (bytes([5, 1, 10, 22]) + bytes(range(0xA0, 0xC0)) + bytes(12) + (910
 MESHCORE_REPLY = b">" + len(SELF_INFO).to_bytes(2, "little") + SELF_INFO
 
 
+@pytest.fixture(autouse=True)
+def no_real_ports(monkeypatch):
+    """Which ports are busy comes from /proc: keep this machine's real serial ports out of the tests."""
+    monkeypatch.setattr(devices, "ports_in_use", lambda: set())
+
+
 @pytest.fixture
 def store(tmp_path):
     s = Store(tmp_path / "test.db")

@@ -121,3 +121,30 @@ def packet_path(near_km, hops, via_mqtt):
     if not plausible(near_km, hops):
         return "inferred"
     return "direct" if hops == 0 else "radio"
+
+
+MC_LABELS = {"direct": "Direct", "radio": "Radio", "inferred": "Too far?", "unknown": "Unknown",
+             "listed": "Not heard"}
+
+
+def mc_via(node, station):
+    """How a MeshCore node reaches this station, from its adverts: (kind, label, why). MeshCore
+    positions aren't rounded, but they're whatever the owner typed in, so it's still 'probably'."""
+    lat0, lon0, _ = station
+    if node["heard_by_us"] is None:
+        return "listed", MC_LABELS["listed"], "Only in the radio's contact list; this station hasn't heard it itself"
+    hops = node["min_hops"]
+    if hops is None:
+        return "unknown", MC_LABELS["unknown"], "Heard only by a set route, which doesn't show how far it came"
+    near = None
+    if lat0 is not None and node["latitude"] is not None:
+        near = nearest_km(lat0, lon0, node["latitude"], node["longitude"], None)
+    if not plausible(near, hops):
+        return "inferred", MC_LABELS["inferred"], (
+            f"{near:.0f} km away in {hops} hop{'s' if hops != 1 else ''}: farther than radio carries in that many "
+            f"hops (at most about {max_plausible_km(hops):.0f} km), so its position is probably wrong, or a "
+            "bridge carried it")
+    if hops == 0:
+        return "direct", MC_LABELS["direct"], "Heard straight from it (0 hops)"
+    return "radio", f"Radio · {hops} hop{'s' if hops != 1 else ''}", \
+        f"Relayed by repeaters, {hops} hop{'s' if hops != 1 else ''} at the fewest"

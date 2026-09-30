@@ -177,6 +177,14 @@ class Radio:
     # ---- status ----
 
     def status(self):
+        """The Meshtastic radio's status, plus the MeshCore radio's under "meshcore" when the logger runs one."""
+        result = self._meshtastic_status()
+        meshcore = getattr(self, "meshcore", None)
+        if meshcore is not None:
+            result["meshcore"] = meshcore.status()
+        return result
+
+    def _meshtastic_status(self):
         iface = self.collector.iface
         if iface is None or not iface.isConnected.is_set():
             return {"connected": False}
@@ -788,9 +796,12 @@ def _routes(radio):
             rows = devices.survey(store, probe_ports=probe, skip=[radio.collector.connected_port])
         finally:
             scan_lock.release()
-        connected = getattr(radio.collector, "connected_hwid", None)
+        connected = {getattr(radio.collector, "connected_hwid", None): "meshtastic",
+                     getattr(getattr(radio, "meshcore", None), "connected_hwid", None): "meshcore"}
+        connected.pop(None, None)
         for r in rows:
-            r["connected"] = connected is not None and r["hardware_id"] == connected
+            r["connected_as"] = connected.get(r["hardware_id"])
+            r["connected"] = r["connected_as"] == "meshtastic"  # the radio MeshShack transmits through
         return {"radios": rows, "kinds": devices.KINDS}
 
     def radio_link(c, b, q):
@@ -810,12 +821,38 @@ def _routes(radio):
             raise ApiError(404, "that radio isn't linked")
         return {"ok": True}
 
+    # ---- MeshCore (a second radio; read only) ----
+
+    def meshcore_status(c, b, q):
+        mc = getattr(radio, "meshcore", None)
+        return mc.status() if mc is not None else {"connected": False, "linked": None}
+
+    def meshcore_nodes(c, b, q):
+        from .coverage import station_from_store
+        from .meshcore_collector import TYPE_NAMES
+        from .paths import mc_via
+
+        station = station_from_store(store)
+        out = []
+        for n in store.mc_nodes(since=q.since())[: q.limit(500)]:
+            d = dict(n)
+            d["type_name"] = TYPE_NAMES.get(n["type"], "unknown")
+            d["via"], d["via_label"], d["via_why"] = mc_via(n, station)
+            out.append(d)
+        return {"nodes": out}
+
     # (method, path) -> (scope, handler(caller, body, query)). Scopes: read, send; config (another app
     # with the config scope may do it now; it can't add airtime); approve (the app does it now; another
     # app with config scope gets it queued for your approval); owner (only the app, ever). A scope can
     # be a function of (caller, body) when it depends on what's asked.
     routes = {
         ("GET", "/api/status"): ("read", lambda c, b, q: radio.status()),
+        ("GET", "/api/meshcore/status"): ("read", meshcore_status),
+        ("GET", "/api/meshcore/nodes"): ("read", meshcore_nodes),
+        ("GET", "/api/meshcore/messages"): ("read", lambda c, b, q: {"messages": _rows(
+            store.mc_messages(limit=q.limit(), since=q.since(), channel=q.int("channel")))}),
+        ("GET", "/api/meshcore/packets"): ("read", lambda c, b, q: {"packets": _rows(
+            store.mc_packets(limit=q.limit(), since=q.since()))}),
         ("GET", "/api/radios"): ("owner", lambda c, b, q: radios(probe=False)),
         ("POST", "/api/radios/scan"): ("owner", lambda c, b, q: radios(probe=True)),
         ("POST", "/api/radios/link"): ("owner", radio_link),

@@ -297,6 +297,15 @@ def find(hwid, ports=None):
     return None
 
 
+def find_port(port, ports=None):
+    """The scan entry for a port given by any of its names (/dev/ttyACM0 or its by-id link), or None."""
+    real = os.path.realpath(port)
+    for p in scan() if ports is None else ports:
+        if os.path.realpath(p["port"]) == real:
+            return p
+    return None
+
+
 def survey(store, probe_ports=False, skip=(), ports=None, prober=None):
     """Every radio: what's plugged in now (probed on request) plus linked radios that aren't.
     `skip` are ports not to probe (e.g. the one the logger holds); busy ports are skipped too."""

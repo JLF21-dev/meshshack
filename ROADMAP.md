@@ -100,7 +100,18 @@ in at send time from data sources, including external APIs. Proposed shape:
 - [ ] Optional output to a local MQTT broker (Home Assistant and similar),
   kept separate from the mesh; it never feeds back into it.
 - [x] Manage API tokens from the app (Device tab), as well as `meshshack token`.
-- [ ] A radio layer ready for MeshCore support.
+- [x] Radios found by hardware ID, with Scan and Link (Device tab, `meshshack radios`).
+
+**MeshCore** (a second radio running MeshCore companion firmware, alongside Meshtastic)
+- [x] Step 1, receive only: log contacts, adverts and heard packets (own tables, keyed by
+  public key); MeshCore nodes on the map (Meshtastic / MeshCore / Both) and in Nodes.
+- [ ] Step 2: MeshCore chat, read only: Public, hashtag channels, direct messages, kept
+  separate from Meshtastic conversations.
+- [ ] Step 3: sending, manual only, through the airtime gatekeeper with its own budget;
+  the kill switch covers both radios.
+- Never a full bridge between the meshes. Maybe later: automation that relays only
+  emergency traffic (SOS/HELP keywords, chosen senders) from one mesh to the other,
+  opt-in, dry run first, rate-limited, loop-proof, and labeled with where it came from.
 - [ ] A formal API description (OpenAPI).
 
 **Ideas**

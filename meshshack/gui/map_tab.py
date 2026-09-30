@@ -12,6 +12,9 @@ from PySide6.QtWidgets import QCheckBox, QComboBox, QHBoxLayout, QLabel, QPushBu
 
 from .. import __version__
 from ..coverage import report as coverage_report
+from ..coverage import station_from_store
+from ..meshcore_collector import TYPE_NAMES as MC_TYPE_NAMES
+from ..paths import mc_via
 from .common import WINDOWS, cell_size_text, distance_km, effective_precision, fmt_ago, precision_cell, since_for, station_position
 
 MAP_HTML = Path(__file__).parent / "assets" / "map.html"
@@ -45,6 +48,13 @@ class MapTab(QWidget):
             self.window_box.addItem(label, seconds)
         self.window_box.setCurrentIndex(int(win.settings.value("map/window", 1)))
         self.window_box.currentIndexChanged.connect(self._window_changed)
+        self.network_box = QComboBox()
+        for label, value in (("Both networks", "both"), ("Meshtastic", "meshtastic"), ("MeshCore", "meshcore")):
+            self.network_box.addItem(label, value)
+        self.network_box.setToolTip("Meshtastic and MeshCore are separate meshes, heard through separate radios")
+        index = self.network_box.findData(win.settings.value("map/network", "both"))
+        self.network_box.setCurrentIndex(max(index, 0))
+        self.network_box.currentIndexChanged.connect(self._network_changed)
         self.trails = QCheckBox("Position trails")
         self.trails.setChecked(win.settings.value("map/trails", "false") == "true")
         self.trails.toggled.connect(self._trails_changed)
@@ -62,7 +72,9 @@ class MapTab(QWidget):
         self.count = QLabel()
 
         controls = QHBoxLayout()
-        controls.addWidget(QLabel("Show nodes heard:"))
+        controls.addWidget(QLabel("Show"))
+        controls.addWidget(self.network_box)
+        controls.addWidget(QLabel("nodes heard:"))
         controls.addWidget(self.window_box)
         controls.addWidget(self.trails)
         controls.addWidget(self.areas)
@@ -89,6 +101,10 @@ class MapTab(QWidget):
 
     def _window_changed(self, index):
         self.win.settings.setValue("map/window", index)
+        self._data_changed()
+
+    def _network_changed(self, index):
+        self.win.settings.setValue("map/network", self.network_box.currentData())
         self._data_changed()
 
     def _trails_changed(self, on):
@@ -129,6 +145,7 @@ class MapTab(QWidget):
         my_num = self.win.my_num
         my_lat, my_lon, my_bits = station_position(self.win.status, self.store, my_num)
 
+        network = self.network_box.currentData()
         paths = self.win.paths()
         reported_bits = self.store.position_precision()
         nodes = []
@@ -139,10 +156,13 @@ class MapTab(QWidget):
                 continue
             if not is_me and since is not None and (n["last_heard"] or 0) < since:
                 continue
+            if network == "meshcore" and not is_me:  # this station stays as the reference point
+                continue
             p = paths.get(n["num"]) or {"kind": "unknown", "label": "Not logged yet", "why": "Only in the radio's "
                                         "saved node list: nothing from it has been logged yet"}
             bits = my_bits if is_me else effective_precision(lat, lon, reported_bits.get(n["num"]))
             nodes.append({
+                "key": n["num"], "net": "meshtastic",
                 "path": p["kind"], "path_label": p["label"], "path_why": p["why"],
                 "cell": precision_cell(lat, lon, bits),
                 "accuracy": f"Approximate: somewhere in a {cell_size_text(lat, bits)} area" if bits else "Exact",
@@ -154,7 +174,15 @@ class MapTab(QWidget):
                 "hops": None if p["kind"] in ("mqtt", "inferred") else n["hops_away"], "battery": n["battery_level"],
                 "distance_km": None if is_me else distance_km(my_lat, my_lon, lat, lon),
             })
-        self.count.setText(f"{len(nodes)} node{'s' if len(nodes) != 1 else ''} with a position")
+        mesh_nodes = len(nodes) - any(n["is_me"] for n in nodes)
+        mc_nodes = self._meshcore_nodes(since, my_lat, my_lon) if network != "meshtastic" else []
+        nodes += mc_nodes
+        parts = []
+        if network != "meshcore":
+            parts.append(f"{mesh_nodes} Meshtastic")
+        if network != "meshtastic":
+            parts.append(f"{len(mc_nodes)} MeshCore")
+        self.count.setText(" + ".join(parts) + " with a position")
 
         tracks = []
         if self.trails.isChecked():
@@ -163,7 +191,7 @@ class MapTab(QWidget):
             for p in self.store.position_tracks(since or 0):
                 if p["from_num"] in shown:
                     points[p["from_num"]].append([p["latitude"], p["longitude"]])
-            tracks = [{"num": num, "points": pts} for num, pts in points.items()]
+            tracks = [{"num": num, "points": pts} for num, pts in points.items() if network != "meshcore"]
         links = []
         if self.links.isChecked() and my_lat is not None:
             preset = (self.win.status.get("lora") or {}).get("modem_preset")
@@ -171,9 +199,30 @@ class MapTab(QWidget):
             links = [{"num": n["num"], "name": n["short_name"] or n["id"], "lat": n["latitude"], "lon": n["longitude"],
                       "snr": n["snr_median"], "margin": n["margin_db"], "packets": n["packets"],
                       "rounded": n["rounded"], "distance": n["distance_km"]}
-                     for n in rep["neighbors"] if n["latitude"] is not None]
+                     for n in rep["neighbors"] if n["latitude"] is not None and network != "meshcore"]
         return {"nodes": nodes, "tracks": tracks, "show_areas": self.areas.isChecked(),
                 "station": [my_lat, my_lon] if my_lat is not None else None, "links": links}
+
+    def _meshcore_nodes(self, since, my_lat, my_lon):
+        station = station_from_store(self.store)
+        out = []
+        for n in self.store.mc_nodes():
+            if n["latitude"] is None or n["longitude"] is None:
+                continue
+            if since is not None and (n["last_heard"] or 0) < since:
+                continue
+            kind, label, why = mc_via(n, station)
+            out.append({
+                "key": "mc:" + n["public_key"], "net": "meshcore", "path": kind, "path_label": label,
+                "path_why": why, "cell": None, "accuracy": "As set by its owner", "approx_distance": False,
+                "id": n["public_key"][:12], "short_name": n["name"] or n["public_key"][:8], "long_name": None,
+                "type": MC_TYPE_NAMES.get(n["type"], "unknown"), "lat": n["latitude"], "lon": n["longitude"],
+                "is_me": False, "age_s": time.time() - n["last_heard"] if n["last_heard"] else None,
+                "age_text": fmt_ago(n["last_heard"]), "snr": n["last_snr"], "rssi": n["last_rssi"],
+                "hops": n["min_hops"], "adverts": n["adverts"],
+                "distance_km": distance_km(my_lat, my_lon, n["latitude"], n["longitude"]),
+            })
+        return out
 
     def _on_action(self, msg):
         action, num = msg.get("action"), msg.get("num")

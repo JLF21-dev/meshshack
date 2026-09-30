@@ -7,13 +7,14 @@ name = "meshshack"
 version = "0.1.0"
 license = "GPL-3.0-or-later"
 license-files = ["LICENSE", "NOTICES.md"]
-description = "MeshShack: a desktop station for Meshtastic: logging, monitoring, messaging, and radio control"
+description = "MeshShack: a desktop station for Meshtastic (and MeshCore): logging, monitoring, messaging, and radio control"
 requires-python = ">=3.10"
 dependencies = ["meshtastic>=2.7"]
 
 [project.optional-dependencies]
 dev = ["pytest"]
 gui = ["PySide6>=6.6", "segno>=1.5"]
+meshcore = ["meshcore>=2.3"]  # a second radio running MeshCore companion firmware
 
 [project.scripts]
 meshshack = "meshshack.cli:main"

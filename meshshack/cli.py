@@ -80,6 +80,12 @@ def cmd_run(args, store):
     from .automation import Automation
 
     radio = Radio(collector, store)  # the one path to the radio, through the airtime gatekeeper
+    from .meshcore_collector import MeshCoreCollector
+
+    # A second radio running MeshCore, if one is linked: receive only, in its own thread.
+    radio.meshcore = MeshCoreCollector(store, retry_seconds=args.retry, bus=bus)
+    meshcore_thread = threading.Thread(target=radio.meshcore.run, args=(stop,), name="meshcore", daemon=True)
+    meshcore_thread.start()
     api = None
     if args.api_port:
         try:
@@ -94,6 +100,8 @@ def cmd_run(args, store):
     try:
         collector.run(stop)
     finally:
+        stop.set()
+        meshcore_thread.join(5)  # let it close the MeshCore port cleanly
         automation.stop()
         if api:
             api.stop()
@@ -267,6 +275,39 @@ def cmd_radios(args, store):
               "some boards restart when their port is opened).")
 
 
+def cmd_meshcore(args, store):
+    from .coverage import station_from_store
+    from .meshcore_collector import TYPE_NAMES
+    from .paths import mc_via
+
+    if args.what == "messages":
+        for m in reversed(store.mc_messages(limit=args.limit, since=args.since)):
+            where = f"#{m['channel_name'] or m['channel']}" if m["channel"] is not None else f"DM {m['pubkey_prefix']}"
+            sender = m["sender"] or ""
+            info = f" [{m['hops']} hop{'s' if m['hops'] != 1 else ''}]" if m["hops"] is not None else ""
+            print(f"{fmt_time(m['logged_at'])}  {where} {sender}{info}: {m['text']}")
+    elif args.what == "packets":
+        print_table(["time", "type", "route", "hops", "snr", "rssi", "from"],
+                    [[fmt_time(p["logged_at"]), p["payload_type"], p["route"], p["hops"], p["snr"], p["rssi"],
+                      (p["public_key"] or "")[:12]] for p in store.mc_packets(limit=args.limit, since=args.since)])
+    elif args.what == "stats":
+        counts, by_type = store.mc_stats(since=args.since)
+        for k, v in counts.items():
+            print(f"{k:>12}: {v}")
+        print()
+        print_table(["type", "packets", "heard directly"], [[r["payload_type"], r["c"], r["direct"]] for r in by_type])
+    else:
+        station = station_from_store(store)
+        print_table(
+            ["name", "type", "key", "via", "last heard", "snr", "rssi", "adverts", "lat", "lon"],
+            [[n["name"], TYPE_NAMES.get(n["type"], "?"), n["public_key"][:12], mc_via(n, station)[1],
+              fmt_ago(n["last_heard"]), n["last_snr"], n["last_rssi"], n["adverts"],
+              f"{n['latitude']:.4f}" if n["latitude"] is not None else None,
+              f"{n['longitude']:.4f}" if n["longitude"] is not None else None]
+             for n in store.mc_nodes(since=args.since)],
+        )
+
+
 def cmd_export(args, store):
     from .export import EXPORTS
 
@@ -404,6 +445,12 @@ def build_parser():
                    help="off blocks every transmission (and config change) until turned back on")
     p.add_argument("-n", "--limit", type=int, default=20)
     p.set_defaults(func=cmd_tx)
+
+    p = sub.add_parser("meshcore", help="what the MeshCore radio has heard: nodes, messages, packets, stats")
+    p.add_argument("what", nargs="?", choices=["nodes", "messages", "packets", "stats"], default="nodes")
+    p.add_argument("--since", type=parse_since, help="e.g. 1h, 24h, 7d")
+    p.add_argument("-n", "--limit", type=int, default=50)
+    p.set_defaults(func=cmd_meshcore)
 
     p = sub.add_parser("radios", help="list radios on USB, and link them so they're found whichever port they're in")
     p.add_argument("action", nargs="?", choices=["list", "link", "unlink"], default="list")

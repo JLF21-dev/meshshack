@@ -206,6 +206,58 @@ CREATE TABLE IF NOT EXISTS station (
     value       TEXT NOT NULL,
     updated_at  REAL NOT NULL
 );
+
+-- MeshCore: a separate mesh, heard through a second radio. Its nodes are known by public key
+-- (64 hex characters). Hops come from the packet's path: 0 means heard straight from the sender.
+CREATE TABLE IF NOT EXISTS mc_nodes (
+    public_key    TEXT PRIMARY KEY,
+    name          TEXT,
+    type          INTEGER,               -- 1 chat, 2 repeater, 3 room server, 4 sensor
+    latitude      REAL,
+    longitude     REAL,
+    first_seen    REAL NOT NULL,
+    last_heard    REAL,                  -- an advert from it was heard (or, from the radio's list, sent)
+    heard_by_us   REAL,                  -- this station heard one of its adverts itself
+    advert_at     INTEGER,               -- its latest advert's own timestamp (the sender's clock)
+    direct_heard  REAL,                  -- heard with no hops
+    last_snr      REAL,                  -- from adverts heard directly only
+    last_rssi     REAL,
+    min_hops      INTEGER,               -- fewest hops any of its adverts took to get here
+    last_hops     INTEGER,
+    adverts       INTEGER NOT NULL DEFAULT 0,
+    is_contact    INTEGER NOT NULL DEFAULT 0  -- in the radio's contact list
+);
+
+-- Every packet the MeshCore radio heard, as it arrived (it can't read most of them).
+CREATE TABLE IF NOT EXISTS mc_packets (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    logged_at     REAL NOT NULL,
+    snr           REAL,
+    rssi          REAL,
+    route         TEXT,                  -- FLOOD, DIRECT, TC_FLOOD, TC_DIRECT
+    payload_type  TEXT,                  -- ADVERT, GRP_TXT (channel), TEXT_MSG (direct), ACK, ...
+    hops          INTEGER,
+    path          TEXT,                  -- hex hashes of the repeaters it came through
+    public_key    TEXT,                  -- the sender, when the packet says (adverts)
+    channel_hash  TEXT,
+    raw           TEXT NOT NULL          -- hex
+);
+CREATE INDEX IF NOT EXISTS mc_packets_logged_at ON mc_packets (logged_at);
+
+CREATE TABLE IF NOT EXISTS mc_messages (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    logged_at      REAL NOT NULL,
+    direction      TEXT NOT NULL DEFAULT 'in',
+    channel        INTEGER,              -- channel slot; NULL for a direct message
+    channel_name   TEXT,
+    sender         TEXT,                 -- channel messages: the name at the start of the text
+    pubkey_prefix  TEXT,                 -- direct messages: the first 6 bytes of the sender's key
+    text           TEXT,
+    sent_at        INTEGER,              -- the sender's clock
+    hops           INTEGER,              -- NULL when it came by a set route
+    snr            REAL
+);
+CREATE INDEX IF NOT EXISTS mc_messages_logged_at ON mc_messages (logged_at);
 """
 
 # Kept separate so the version-1 migration can rebuild the table.
@@ -236,7 +288,7 @@ CREATE INDEX IF NOT EXISTS messages_logged_at ON messages (logged_at);
 CREATE INDEX IF NOT EXISTS messages_packet_id ON messages (packet_id);
 """
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7  # v7: MeshCore tables (created by SCHEMA; nothing to migrate)
 REQUEST_TIMEOUT = 180
 
 
@@ -1199,3 +1251,158 @@ class Store:
             (since,),
         )
         return counts, by_port
+
+    # ---- MeshCore ----
+
+    MC_FLOOD_ROUTES = ("FLOOD", "TC_FLOOD")
+
+    @staticmethod
+    def mc_hops(route, path_len):
+        """Hops a MeshCore packet took to reach us. A flooded packet's path lists every repeater
+        it passed; a directly routed one carries the route still ahead, so only an empty one
+        (sent straight to us) says anything."""
+        if path_len is None:
+            return None
+        if route in Store.MC_FLOOD_ROUTES:
+            return path_len
+        return 0 if route in ("DIRECT", "TC_DIRECT") and path_len == 0 else None
+
+    def mc_record_packet(self, d, now=None):
+        """One packet from the radio's receive log (the meshcore library's RX_LOG_DATA payload).
+        Adverts also update the sender's node. Returns the row id."""
+        now = now or time.time()
+        route, kind = d.get("route_typename"), d.get("payload_typename")
+        hops = self.mc_hops(route, d.get("path_len"))
+        with self._lock, self._conn:
+            row = self._conn.execute(
+                """INSERT INTO mc_packets (logged_at, snr, rssi, route, payload_type, hops, path, public_key,
+                                           channel_hash, raw)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (now, d.get("snr"), d.get("rssi"), route, kind, hops, d.get("path") or None, d.get("adv_key"),
+                 d.get("chan_hash"), d.get("payload") or d.get("raw_hex") or ""),
+            ).lastrowid
+        if kind == "ADVERT" and d.get("adv_key"):
+            self.mc_record_advert(d["adv_key"], name=d.get("adv_name"), type_=d.get("adv_type"),
+                                  lat=d.get("adv_lat"), lon=d.get("adv_lon"), advert_at=d.get("adv_timestamp"),
+                                  hops=hops, snr=d.get("snr"), rssi=d.get("rssi"), now=now)
+        return row
+
+    def mc_record_advert(self, key, name=None, type_=None, lat=None, lon=None, advert_at=None, hops=None,
+                         snr=None, rssi=None, now=None):
+        """An advert this station heard. The same advert usually arrives several times by different
+        repeaters; each copy can lower the hop count, but it's counted once."""
+        now = now or time.time()
+        with self._lock, self._conn:
+            old = self._conn.execute("SELECT * FROM mc_nodes WHERE public_key = ?", (key,)).fetchone()
+            old = dict(old) if old else {"first_seen": now, "adverts": 0, "is_contact": 0}
+            newer = advert_at is not None and (old.get("advert_at") is None or advert_at > old["advert_at"])
+            has_position = lat is not None and lon is not None and (lat, lon) != (0, 0)
+            direct = hops == 0
+            row = {
+                "public_key": key,
+                "name": name or old.get("name"),
+                "type": type_ if type_ is not None else old.get("type"),
+                "latitude": lat if has_position and (newer or old.get("latitude") is None) else old.get("latitude"),
+                "longitude": lon if has_position and (newer or old.get("longitude") is None) else old.get("longitude"),
+                "first_seen": old["first_seen"],
+                "last_heard": now,
+                "heard_by_us": now,
+                "advert_at": advert_at if newer else old.get("advert_at"),
+                "direct_heard": now if direct else old.get("direct_heard"),
+                "last_snr": snr if direct else old.get("last_snr"),
+                "last_rssi": rssi if direct else old.get("last_rssi"),
+                "min_hops": hops if hops is not None and (old.get("min_hops") is None or hops < old["min_hops"])
+                else old.get("min_hops"),
+                "last_hops": hops if hops is not None else old.get("last_hops"),
+                "adverts": old["adverts"] + (1 if newer or advert_at is None else 0),
+                "is_contact": old["is_contact"],
+            }
+            self._mc_write_node(row)
+
+    def mc_record_contact(self, c, now=None):
+        """An entry from the radio's contact list (the library's contact dict). Its last_advert is
+        the sender's own clock, so it only counts as 'heard' when it isn't in the future."""
+        now = now or time.time()
+        key = c["public_key"]
+        lat, lon = c.get("adv_lat"), c.get("adv_lon")
+        has_position = lat is not None and lon is not None and (lat, lon) != (0, 0)
+        advert_at = c.get("last_advert") or None
+        with self._lock, self._conn:
+            old = self._conn.execute("SELECT * FROM mc_nodes WHERE public_key = ?", (key,)).fetchone()
+            old = dict(old) if old else {"first_seen": now, "adverts": 0}
+            newer = advert_at is not None and (old.get("advert_at") is None or advert_at > old["advert_at"])
+            sent = advert_at if advert_at and advert_at <= now + 600 else None
+            row = {**{k: old.get(k) for k in ("heard_by_us", "direct_heard", "last_snr", "last_rssi", "min_hops",
+                                              "last_hops")},
+                   "public_key": key,
+                   "name": c.get("adv_name") or old.get("name"),
+                   "type": c.get("type") if c.get("type") is not None else old.get("type"),
+                   "latitude": lat if has_position and (newer or old.get("latitude") is None) else old.get("latitude"),
+                   "longitude": lon if has_position and (newer or old.get("longitude") is None) else old.get("longitude"),
+                   "first_seen": old["first_seen"],
+                   "last_heard": max(x for x in (old.get("last_heard"), sent, 0) if x is not None) or None,
+                   "advert_at": advert_at if newer else old.get("advert_at"),
+                   "adverts": old["adverts"],
+                   "is_contact": 1}
+            self._mc_write_node(row)
+
+    def _mc_write_node(self, row):
+        cols = ", ".join(row)
+        self._conn.execute(
+            f"""INSERT INTO mc_nodes ({cols}) VALUES ({", ".join("?" for _ in row)})
+                ON CONFLICT (public_key) DO UPDATE SET
+                {", ".join(f"{k} = excluded.{k}" for k in row if k != "public_key")}""",
+            tuple(row.values()),
+        )
+
+    def mc_record_message(self, m, channel_name=None, now=None):
+        """A message the radio received (the library's CHANNEL_MSG_RECV / CONTACT_MSG_RECV payload).
+        Channel messages carry the sender only as a "Name: " at the start of the text."""
+        now = now or time.time()
+        text = m.get("text") or ""
+        sender = None
+        is_channel = m.get("type") == "CHAN"
+        if is_channel and ": " in text:
+            sender, text = text.split(": ", 1)
+        path_len = m.get("path_len")
+        with self._lock, self._conn:
+            return self._conn.execute(
+                """INSERT INTO mc_messages (logged_at, direction, channel, channel_name, sender, pubkey_prefix, text,
+                                            sent_at, hops, snr)
+                   VALUES (?, 'in', ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (now, m.get("channel_idx") if is_channel else None, channel_name if is_channel else None, sender,
+                 None if is_channel else m.get("pubkey_prefix"), text, m.get("sender_timestamp"),
+                 None if path_len in (None, 255) else path_len, m.get("SNR")),
+            ).lastrowid
+
+    def mc_nodes(self, since=None):
+        if since is None:
+            return self._query("SELECT * FROM mc_nodes ORDER BY last_heard DESC NULLS LAST")
+        return self._query("SELECT * FROM mc_nodes WHERE last_heard >= ? ORDER BY last_heard DESC", (since,))
+
+    def mc_node_by_prefix(self, prefix):
+        rows = self._query("SELECT * FROM mc_nodes WHERE public_key LIKE ? LIMIT 2", (prefix.lower() + "%",))
+        return rows[0] if len(rows) == 1 else None
+
+    def mc_messages(self, limit=100, since=None, channel=None):
+        where, params = ["logged_at >= ?"], [since or 0]
+        if channel is not None:
+            where.append("channel = ?")
+            params.append(channel)
+        return self._query(
+            f"SELECT * FROM mc_messages WHERE {' AND '.join(where)} ORDER BY logged_at DESC LIMIT ?",
+            (*params, limit))
+
+    def mc_packets(self, limit=100, since=None):
+        return self._query("SELECT * FROM mc_packets WHERE logged_at >= ? ORDER BY logged_at DESC LIMIT ?",
+                           (since or 0, limit))
+
+    def mc_stats(self, since=None):
+        since = since or 0
+        by_type = self._query(
+            """SELECT COALESCE(payload_type, '?') AS payload_type, COUNT(*) AS c,
+                      SUM(CASE WHEN hops = 0 THEN 1 ELSE 0 END) AS direct
+               FROM mc_packets WHERE logged_at >= ? GROUP BY payload_type ORDER BY c DESC""", (since,))
+        nodes = self._query("SELECT COUNT(*) AS c FROM mc_nodes WHERE last_heard >= ?", (since,))[0]["c"]
+        return {"packets": sum(r["c"] for r in by_type), "nodes heard": nodes,
+                "messages": self._query("SELECT COUNT(*) AS c FROM mc_messages WHERE logged_at >= ?", (since,))[0]["c"]}, by_type

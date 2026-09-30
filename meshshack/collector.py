@@ -6,7 +6,6 @@ Meshtastic-looking device, which then gets linked so it's found again next time.
 """
 
 import logging
-import os
 
 import meshtastic.serial_interface
 import meshtastic.util
@@ -89,12 +88,6 @@ class Collector:
             self._warn(f"No Meshtastic device found; will keep checking every {self.retry_seconds}s")
         return None
 
-    def _hardware_id(self, port):
-        real = os.path.realpath(port)
-        for p in devices.scan():
-            if os.path.realpath(p["port"]) == real:
-                return p["hardware_id"]
-        return None
 
     def _connect(self):
         port = self._find_port()
@@ -121,7 +114,7 @@ class Collector:
         for node in list((iface.nodesByNum or {}).values()):
             self.store.record_node_info(node)
         self.connected_port = port
-        self.connected_hwid = self._hardware_id(port)
+        self.connected_hwid = (devices.find_port(port) or {}).get("hardware_id")
         linked = devices.linked(self.store, "meshtastic")
         if self.connected_hwid and not linked:
             devices.link(self.store, self.connected_hwid, "meshtastic", label=user.get("longName"), node=user.get("id"))

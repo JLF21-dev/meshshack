@@ -66,7 +66,7 @@ you) and changes each time the logger starts.
 git clone https://github.com/JLF21-dev/meshshack.git
 cd meshshack
 python3 -m venv .venv
-.venv/bin/pip install -e '.[dev,gui]'    # drop ",gui" for a headless logger
+.venv/bin/pip install -e '.[dev,gui,meshcore]'  # drop ",gui" for a headless logger, ",meshcore" without a MeshCore radio
 ```
 
 Linux only lets members of the `dialout` group open serial ports:
@@ -115,13 +115,34 @@ without anything breaking. The logger uses the radio linked as Meshtastic; the f
 time it connects to one, it links it. With several possible radios plugged in and
 none linked, it waits for you to choose rather than guess. Link, unlink and scan in
 the Device tab's **Radios** section or with `meshshack radios`. A radio linked as
-MeshCore is never touched by the Meshtastic logger (MeshCore logging itself is on the
-roadmap).
+MeshCore is never touched by the Meshtastic logger; it's logged separately (see MeshCore
+below).
 
 Scanning only asks each free radio what it is, over the USB cable; nothing is
 transmitted. It skips the port the logger holds. Boards whose USB is the ESP32's own
 (MeshCore on a Heltec V4, for one) restart when their port is opened, and come back
 a few seconds later.
+
+### MeshCore
+
+[MeshCore](https://github.com/meshcore-dev/MeshCore) is a separate LoRa mesh. The two can't
+hear each other, so MeshCore needs its own radio, flashed with MeshCore's **companion (USB)**
+firmware and set to your region's MeshCore frequency (in the US, 910.525 MHz, 62.5 kHz, SF7).
+Install with the `meshcore` extra, plug the radio in, then Scan and **Link as MeshCore** in
+the Device tab (or `meshshack radios link HARDWARE_ID --as meshcore`). The logger then runs it
+alongside the Meshtastic radio.
+
+For now MeshShack only listens to it: every packet it hears (with SNR, RSSI and hops), the
+adverts nodes send (name, type, position), its contact list, and messages on its channels.
+Nothing is ever transmitted through it. MeshCore nodes show on the map (hexagons; pick
+Meshtastic, MeshCore or both) and in the Nodes tab with a Network column.
+
+```bash
+.venv/bin/meshshack meshcore             # nodes heard, with how each one reaches you
+.venv/bin/meshshack meshcore messages    # also: packets, stats
+```
+
+MeshShack never bridges the two meshes.
 
 Only one program can hold the USB port at a time. While `meshshack run` is
 connected, use the phone app over Bluetooth, not USB tools like the
@@ -407,7 +428,7 @@ A token is shown once; only its hash is stored. Send it as
 
 | Endpoint | Needs | What it does |
 |----------|-------|--------------|
-| `GET /api/status` | read | Radio, LoRa settings, channels, battery |
+| `GET /api/status` | read | Radio, LoRa settings, channels, battery; the MeshCore radio under `meshcore` |
 | `GET /api/nodes?since=24h` | read | Nodes, with `via` (direct, radio, both, mqtt, inferred, unknown), `via_label` and `via_why` |
 | `GET /api/messages?since=&channel=&peer=` | read | Text messages; a channel or a DM peer gives that conversation |
 | `GET /api/packets?since=&type=&node=` | read | Raw packets, fully decoded |
@@ -417,7 +438,8 @@ A token is shown once; only its hash is stored. Send it as
 | `GET /api/coverage?since=` | read | Direct neighbors and traffic sources |
 | `GET /api/alerts?open=1` | read | Emergency alerts |
 | `GET /api/tx` | read | Transmit switch and recent send decisions |
-| `GET /api/events` | read | Live stream (server-sent events): `packet`, `message`, `alert`, `approval`, `connection` |
+| `GET /api/meshcore/nodes?since=`, `/api/meshcore/messages?since=&channel=`, `/api/meshcore/packets?since=`, `/api/meshcore/status` | read | What the MeshCore radio has heard (receive only) |
+| `GET /api/events` | read | Live stream (server-sent events): `packet`, `message`, `alert`, `approval`, `connection`, `meshcore` |
 | `POST /api/send` `{text, to \| channel, reply_id?, emoji?}` | send | Message, reply, or reaction; a channel message only with broadcast permission |
 | `POST /api/traceroute` `{to}` | send | Traceroute (spaced 3 min apart; a node at most every 3 h) |
 | `POST /api/request` `{to, what}` | send | Ask a node for `position`, `telemetry` or `nodeinfo` |
@@ -429,6 +451,7 @@ A token is shown once; only its hash is stored. Send it as
 | `POST /api/automation/save` | config (dry run) / approval (live) | Save an automation job |
 | `POST /api/tx {enabled: true}`, `/api/reboot`, `/api/config/{owner,role,position}`, `/api/channels/{add,update,delete}`, `/api/automation/{delete,settings}` | approval | Queued for you to approve |
 | `GET /api/approvals` | config | This app's requests and what became of them |
+| `GET /api/radios`, `POST /api/radios/{scan,link,unlink}` | app only | Which radio is which |
 | `GET /api/channels`, `GET /api/automation`, `POST /api/automation/preview`, `POST /api/approvals/decide` | app only | Keys, job details, deciding requests |
 
 `since` takes a unix time or a duration like `30m`, `24h`, `7d`; `limit`

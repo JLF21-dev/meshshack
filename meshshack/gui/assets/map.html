@@ -29,7 +29,7 @@ L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
   attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
 }).addTo(map);
 
-const markers = new Map();  // node num -> marker
+const markers = new Map();  // node key (Meshtastic num, or 'mc:' + MeshCore public key) -> marker
 const trails = L.layerGroup().addTo(map);
 const areas = L.layerGroup().addTo(map);  // precision cells of rounded positions
 const links = L.layerGroup().addTo(map);  // direct links from this station
@@ -43,7 +43,7 @@ legend.onAdd = () => {
     row('circle', '#2e7d32', 'Under 1 hour') +
     row('circle', '#f9a825', 'Under 24 hours') +
     row('circle', '#9e9e9e', 'Older') +
-    '<b>Heard via</b>' +
+    '<b>Meshtastic, heard via</b>' +
     row('me', '#1a73e8', 'This station') +
     row('circle', '#fff', 'Radio (direct or relayed)') +
     row('square', '#fff', 'Internet (flagged MQTT)') +
@@ -52,6 +52,10 @@ legend.onAdd = () => {
     row('diamond', '#fff', 'Not logged yet, or path unknown') +
     '<svg width="12" height="12" viewBox="0 0 12 12"><line x1="0" y1="6" x2="12" y2="6" stroke="#2a78d6" stroke-width="2"/></svg>' +
     'Direct link (when shown)<br>' +
+    '<b>MeshCore</b>' +
+    row('hex', '#fff', 'Node (direct or relayed)') +
+    row('hex_r', '#fff', 'Repeater or room server') +
+    row('hex_q', '#fff', 'Too far for its hops?') +
     '<b>Position</b>' +
     '<svg width="12" height="12" viewBox="0 0 12 12"><rect x="1" y="1" width="10" height="10" fill="rgba(0,0,0,0.06)" ' +
     'stroke="#555" stroke-dasharray="2 2"/></svg>Rounded: node is somewhere in the box';
@@ -71,6 +75,8 @@ function color(node) {
 const SHAPE_FOR_PATH = { direct: 'circle', radio: 'circle', mqtt: 'square', inferred: 'square_q', both: 'triangle',
                          unknown: 'diamond' };
 
+const HEX = '10,1.5 17.5,5.75 17.5,14.25 10,18.5 2.5,14.25 2.5,5.75';
+
 function starPoints(cx, cy, outer, inner) {
   const pts = [];
   for (let i = 0; i < 10; i++) {
@@ -89,14 +95,26 @@ function shapeSvg(shape, fill, size, stroke = '#fff', strokeWidth = 2) {
     triangle: '<polygon points="10,2.5 18,16.5 2,16.5" stroke-linejoin="round"/>',
     diamond: '<polygon points="10,1.5 18,10 10,18.5 2,10" stroke-linejoin="round"/>',
     me: `<polygon points="${starPoints(10, 10.5, 9, 4)}" stroke-linejoin="round"/>`,
+    hex: `<polygon points="${HEX}" stroke-linejoin="round"/>`,
+    hex_q: `<polygon points="${HEX}" stroke-linejoin="round" stroke-dasharray="3 2"/>`,
+    hex_r: `<polygon points="${HEX}" stroke-linejoin="round"/><circle cx="10" cy="10" r="2.6" fill="${stroke}"/>`,
   }[shape];
   return `<svg width="${size}" height="${size}" viewBox="0 0 20 20">` +
     `<g fill="${fill}" stroke="${stroke}" stroke-width="${strokeWidth * 20 / size}">${body}</g></svg>`;
 }
 
 // offset: [dx, dy] pixels, to fan out nodes that share one point (see fanOffsets).
+function markerShape(n) {
+  if (n.is_me) return 'me';
+  if (n.net === 'meshcore') {
+    if (n.path === 'inferred') return 'hex_q';
+    return n.type === 'repeater' || n.type === 'room server' ? 'hex_r' : 'hex';
+  }
+  return SHAPE_FOR_PATH[n.path] || 'circle';
+}
+
 function nodeIcon(n, offset) {
-  const shape = n.is_me ? 'me' : (SHAPE_FOR_PATH[n.path] || 'circle');
+  const shape = markerShape(n);
   const size = n.is_me ? 24 : 18;
   const [dx, dy] = offset;
   return L.divIcon({
@@ -129,11 +147,11 @@ function fanOffsets(nodes) {
   }
   const offsets = new Map();
   for (const group of groups.values()) {
-    group.sort((a, b) => a.num - b.num);  // stable placement across refreshes
+    group.sort((a, b) => String(a.key).localeCompare(String(b.key)));  // stable placement across refreshes
     const radius = group.length > 1 ? 10 + 3 * group.length : 0;
     group.forEach((n, i) => {
       const angle = 2 * Math.PI * i / group.length - Math.PI / 2;
-      offsets.set(n.num, [Math.round(radius * Math.cos(angle)), Math.round(radius * Math.sin(angle))]);
+      offsets.set(n.key, [Math.round(radius * Math.cos(angle)), Math.round(radius * Math.sin(angle))]);
     });
   }
   return offsets;
@@ -152,7 +170,19 @@ function act(action, num) {
   console.log('meshshack:' + JSON.stringify({ action, num }));
 }
 
+function meshcorePopupHtml(n) {
+  const rows = [['Network', 'MeshCore'], ['Type', n.type], ['Last heard', n.age_text], ['Heard via', heardViaText(n)],
+    ['Position', n.accuracy], ['Direct SNR', n.snr != null ? n.snr.toFixed(1) + ' dB' : null],
+    ['Direct RSSI', n.rssi], ['Fewest hops', n.hops], ['Adverts heard', n.adverts],
+    ['Distance', n.distance_km != null ? n.distance_km.toFixed(1) + ' km' : null]]
+    .filter(r => r[1] != null && r[1] !== '')
+    .map(r => `<tr><td>${esc(r[0])}</td><td>${esc(r[1])}</td></tr>`).join('');
+  return `<div class="popup"><div class="popup-title">${esc(n.short_name)}</div>` +
+    `<div class="popup-sub">MeshCore · key ${esc(n.id)}…</div><table>${rows}</table></div>`;
+}
+
 function popupHtml(n) {
+  if (n.net === 'meshcore') return meshcorePopupHtml(n);
   const rows = [['Last heard', n.age_text], ['Heard via', n.is_me ? null : heardViaText(n)],
     ['Position', n.accuracy], ['Hardware', n.hw_model], ['Role', n.role],
     ['Direct SNR', n.snr != null ? n.snr.toFixed(1) + ' dB' : null], ['Direct RSSI', n.rssi],
@@ -187,21 +217,21 @@ window.meshshack = {
     }
     const drawnCells = new Set();  // nodes sharing a cell share one box, colored by the freshest (listed first)
     for (const n of data.nodes) {
-      seen.add(n.num);
+      seen.add(n.key);
       if (data.show_areas && n.cell && !drawnCells.has(String(n.cell))) {
         drawnCells.add(String(n.cell));
         L.rectangle(n.cell, { color: color(n), weight: 1.5, opacity: 0.75, dashArray: '5 4',
                               fillOpacity: 0.08, interactive: false }).addTo(areas);
       }
-      const offset = offsets.get(n.num);
-      const iconKey = [n.is_me, n.path, color(n), offset].join('|');
-      let m = markers.get(n.num);
+      const offset = offsets.get(n.key);
+      const iconKey = [markerShape(n), color(n), offset].join('|');
+      let m = markers.get(n.key);
       if (!m) {
         m = L.marker([n.lat, n.lon], { icon: nodeIcon(n, offset), zIndexOffset: n.is_me ? 1000 : 0 }).addTo(map);
         m.iconKey = iconKey;
         m.bindPopup('');
         bindLabel(m, offset);
-        markers.set(n.num, m);
+        markers.set(n.key, m);
       }
       // Update in place so an open popup stays open across refreshes; only redraw an icon that changed.
       m.setLatLng([n.lat, n.lon]);
@@ -209,8 +239,8 @@ window.meshshack = {
       m.setPopupContent(popupHtml(n));
       m.setTooltipContent(esc(n.short_name || n.id));
     }
-    for (const [num, m] of markers) {
-      if (!seen.has(num)) { m.remove(); markers.delete(num); }
+    for (const [key, m] of markers) {
+      if (!seen.has(key)) { m.remove(); markers.delete(key); }
     }
     trails.clearLayers();
     for (const track of data.tracks) {

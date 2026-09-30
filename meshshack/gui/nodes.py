@@ -12,15 +12,20 @@ from PySide6.QtWidgets import (
     QToolButton, QVBoxLayout, QWidget,
 )
 
+from ..coverage import station_from_store
 from ..export import EXPORTS
+from ..meshcore_collector import TYPE_NAMES as MC_TYPE_NAMES
+from ..paths import mc_via
 from .charts import NodeCharts
 from .common import (
     WINDOWS, cell_size_text, distance_km, effective_precision, fmt_ago, since_for, station_position,
 )
 
-COLUMNS = ["Short", "Long name", "ID", "Hardware", "Role", "Last heard", "Via", "Direct SNR", "Direct RSSI", "Hops",
-           "Battery", "Distance"]
+COLUMNS = ["Short", "Long name", "ID", "Network", "Hardware", "Role", "Last heard", "Via", "Direct SNR", "Direct RSSI",
+           "Hops", "Battery", "Distance"]
 HEADER_TIPS = {
+    "Network": "Meshtastic or MeshCore: separate meshes that can't hear each other, logged through separate radios. "
+               "For MeshCore nodes, Hardware shows the node type and ID the start of its public key.",
     "Last heard": "Last packet from this node by any path, including the internet (MQTT)",
     "Via": "How this node's packets reach you: Direct, Radio (with the fewest hops), Internet (flagged MQTT), "
            "Internet? (not flagged, but farther away than radio carries in its hop count), both, or Unknown (older "
@@ -89,8 +94,15 @@ class NodesTab(QWidget):
         self.search.setPlaceholderText("Filter by name, ID or hardware")
         self.search.textChanged.connect(self.refresh)
         self.count = QLabel()
+        self.network_box = QComboBox()
+        for label, value in (("All networks", "both"), ("Meshtastic", "meshtastic"), ("MeshCore", "meshcore")):
+            self.network_box.addItem(label, value)
+        self.network_box.setCurrentIndex(max(self.network_box.findData(win.settings.value("nodes/network", "both")), 0))
+        self.network_box.currentIndexChanged.connect(
+            lambda _: (win.settings.setValue("nodes/network", self.network_box.currentData()), self.refresh()))
 
         top = QHBoxLayout()
+        top.addWidget(self.network_box)
         top.addWidget(QLabel("Heard:"))
         top.addWidget(self.window_box)
         top.addWidget(self.search, 1)
@@ -184,14 +196,22 @@ class NodesTab(QWidget):
         self.win.settings.setValue("nodes/window", index)
         self.refresh()
 
-    def _selected_num(self):
+    def _selected_key(self):
+        """The selected row: a Meshtastic node number, or 'mc:' + a MeshCore public key."""
         rows = self.table.selectionModel().selectedRows()
         if not rows:
             return None
         return self.table.item(rows[0].row(), 0).data(Qt.UserRole)
 
+    def _selected_num(self):
+        """The selected Meshtastic node, if that's what's selected. The actions, favorites and charts
+        are Meshtastic's, so a MeshCore row counts as nothing selected for them."""
+        key = self._selected_key()
+        return key if isinstance(key, int) else None
+
     def refresh(self):
-        selected = self._selected_num()
+        selected = self._selected_key()
+        network = self.network_box.currentData()
         since = since_for(self.window_box.currentData())
         needle = self.search.text().strip().lower()
         my_num = self.win.my_num
@@ -199,7 +219,7 @@ class NodesTab(QWidget):
         reported_bits = self.store.position_precision()
         paths = self.win.paths()
 
-        nodes = [n for n in self.store.nodes(since=since) if n["num"] != my_num]
+        nodes = [n for n in self.store.nodes(since=since) if n["num"] != my_num] if network != "meshcore" else []
         if self.radio_only.isChecked():
             nodes = [n for n in nodes if (paths.get(n["num"]) or {}).get("kind") not in ("mqtt", "inferred")]
         if needle:
@@ -210,8 +230,15 @@ class NodesTab(QWidget):
         sort_order = self.table.horizontalHeader().sortIndicatorOrder()
         self.sort_state.favorites_first = self.favorites_first.isChecked()
         self.sort_state.order = sort_order
+        mc_nodes = self._meshcore_rows(since, needle, my_lat, my_lon) if network != "meshtastic" else []
         self.table.setSortingEnabled(False)
-        self.table.setRowCount(len(nodes))
+        self.table.setRowCount(len(nodes) + len(mc_nodes))
+        for row, cells in enumerate(mc_nodes, start=len(nodes)):
+            for col, item in enumerate(cells):
+                item.state = self.sort_state
+                if col >= COLUMNS.index("Last heard") and COLUMNS[col] != "Via":
+                    item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                self.table.setItem(row, col, item)
         for row, n in enumerate(nodes):
             dist = distance_km(my_lat, my_lon, n["latitude"], n["longitude"])
             p = paths.get(n["num"]) or {"kind": "unknown", "label": "", "why": "Nothing from it logged yet"}
@@ -224,6 +251,7 @@ class NodesTab(QWidget):
                 SortItem(("★ " if favorite else "") + (n["short_name"] or ""), (n["short_name"] or "").lower() or None),
                 SortItem(n["long_name"] or "", (n["long_name"] or "").lower() or None),
                 SortItem(n["node_id"], n["node_id"]),
+                SortItem("Meshtastic", "meshtastic"),
                 SortItem(n["hw_model"] or "", n["hw_model"]),
                 SortItem(n["role"] or "", n["role"]),
                 SortItem(fmt_ago(n["last_heard"]), n["last_heard"]),
@@ -257,17 +285,51 @@ class NodesTab(QWidget):
                 if self.table.item(row, 0).data(Qt.UserRole) == selected:
                     self.table.selectRow(row)
                     break
-        if not getattr(self, "_sized", False) and nodes:
+        if not getattr(self, "_sized", False) and (nodes or mc_nodes):
             self.table.resizeColumnsToContents()
             self._sized = True
 
-        self.count.setText(f"{len(nodes)} node{'s' if len(nodes) != 1 else ''}")
+        total = len(nodes) + len(mc_nodes)
+        count = f"{total} node{'s' if total != 1 else ''}"
+        if nodes and mc_nodes:
+            count += f" ({len(nodes)} Meshtastic, {len(mc_nodes)} MeshCore)"
+        self.count.setText(count)
         self._update_buttons()
-        current = self._selected_num()
+        current = self._selected_key()
         if current != selected or current is not None:
-            self._show_details(current)
-            self.charts.set_node(current)
+            self._show_selected()
+            self.charts.set_node(self._selected_num())
             self.charts.refresh()
+
+    def _meshcore_rows(self, since, needle, my_lat, my_lon):
+        station = station_from_store(self.store)
+        rows = []
+        for n in self.store.mc_nodes(since=since):
+            kind = MC_TYPE_NAMES.get(n["type"], "unknown")
+            if needle and needle not in f"{n['name'] or ''} {n['public_key']} {kind}".lower():
+                continue
+            via, label, why = mc_via(n, station)
+            dist = distance_km(my_lat, my_lon, n["latitude"], n["longitude"])
+            cells = [
+                SortItem(n["name"] or "", (n["name"] or "").lower() or None),
+                SortItem("", None),
+                SortItem(n["public_key"][:12], n["public_key"]),
+                SortItem("MeshCore", "meshcore"),
+                SortItem(kind, kind),
+                SortItem("", None),
+                SortItem(fmt_ago(n["last_heard"]), n["last_heard"]),
+                SortItem(label, via),
+                SortItem(f"{n['last_snr']:.1f}" if n["last_snr"] is not None else "", n["last_snr"]),
+                SortItem(f"{n['last_rssi']:.0f}" if n["last_rssi"] is not None else "", n["last_rssi"]),
+                SortItem(str(n["last_hops"]) if n["last_hops"] is not None else "", n["last_hops"]),
+                SortItem("", None),
+                SortItem(f"{dist:.1f} km" if dist is not None else "", dist),
+            ]
+            cells[0].setData(Qt.UserRole, "mc:" + n["public_key"])
+            cells[COLUMNS.index("Via")].setToolTip(why)
+            cells[COLUMNS.index("ID")].setToolTip(f"Public key {n['public_key']}")
+            rows.append(cells)
+        return rows
 
     def _update_buttons(self):
         num = self._selected_num()
@@ -282,9 +344,52 @@ class NodesTab(QWidget):
 
     def _selection_changed(self):
         self._update_buttons()
-        num = self._selected_num()
-        self.charts.set_node(num)
-        self._show_details(num)
+        self.charts.set_node(self._selected_num())
+        self._show_selected()
+
+    def _show_selected(self):
+        key = self._selected_key()
+        if isinstance(key, str) and key.startswith("mc:"):
+            self._show_meshcore_details(key[3:])
+        else:
+            self._show_details(key)
+
+    def _show_meshcore_details(self, public_key):
+        n = next((r for r in self.store.mc_nodes() if r["public_key"] == public_key), None)
+        if n is None:
+            return
+        kind, label, why = mc_via(n, station_from_store(self.store))
+        my_lat, my_lon, _ = station_position(self.win.status, self.store, self.win.my_num)
+
+        def when(ts):
+            return f"{fmt_ago(ts)} ({time.strftime('%b %-d %H:%M', time.localtime(ts))})" if ts else "never"
+
+        rows = [
+            ("Node", f"{n['name'] or '?'} · MeshCore {MC_TYPE_NAMES.get(n['type'], 'node')}"),
+            ("Public key", n["public_key"]),
+            ("Heard", f"{label}. {why}"),
+            ("First seen", when(n["first_seen"])),
+            ("Last heard", f"{when(n['last_heard'])}; by this station {when(n['heard_by_us'])}; "
+                           f"directly {when(n['direct_heard'])}"),
+            ("Adverts heard", str(n["adverts"])),
+        ]
+        if n["last_snr"] is not None:
+            rows.append(("Direct signal", f"SNR {n['last_snr']:.1f} dB, RSSI {n['last_rssi']:.0f} "
+                                          f"(heard directly {fmt_ago(n['direct_heard'])})"))
+        if n["min_hops"] is not None:
+            rows.append(("Hops", f"{n['min_hops']} at the fewest, {n['last_hops']} last time"))
+        if n["latitude"] is not None:
+            where = f"{n['latitude']:.5f}, {n['longitude']:.5f} (as set by its owner)"
+            dist = distance_km(my_lat, my_lon, n["latitude"], n["longitude"])
+            if dist is not None:
+                where += f"; {dist:.1f} km from you"
+            rows.append(("Position", where))
+        rows.append(("On your radio", "In its contact list" if n["is_contact"] else "Not in its contact list"))
+        html = "".join(f"<tr><td style='color:gray; padding-right:12px; white-space:nowrap'>{escape(k)}</td>"
+                       f"<td>{escape(v)}</td></tr>" for k, v in rows)
+        self.details.setHtml(f"<table cellspacing='0' cellpadding='3'>{html}</table>"
+                             "<p style='color:gray'>MeshCore is receive-only for now: messages, traceroutes and "
+                             "requests are Meshtastic's.</p>")
 
     def _export(self, what, fmt):
         exporter, ext, label = EXPORTS[(what, fmt)]
@@ -398,7 +503,7 @@ class NodesTab(QWidget):
         self.details.setHtml(f"<table cellspacing='0' cellpadding='3'>{html}</table>")
 
     def _context_menu(self, pos):
-        if self._selected_num() is None:
+        if self._selected_num() is None:  # MeshCore rows have no actions yet
             return
         menu = QMenu(self)
         for label, action in ACTIONS:
