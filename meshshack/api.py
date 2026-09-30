@@ -197,6 +197,7 @@ class Radio:
         return {
             "connected": True,
             "port": self.collector.connected_port,
+            "hardware_id": getattr(self.collector, "connected_hwid", None),
             "node": {
                 "num": iface.myInfo.my_node_num,
                 "id": user.get("id"),
@@ -774,12 +775,51 @@ def _routes(radio):
         args = body_args(b, "text", optional=("channel", "to", "reply_id", "emoji"))
         return radio.send_text(**args, source=c.source, allow_broadcast=c.allow_broadcast)
 
+    # ---- radios on USB (owner only: which radio the station transmits through is yours to pick) ----
+
+    scan_lock = threading.Lock()
+
+    def radios(probe):
+        from . import devices
+
+        if not scan_lock.acquire(timeout=30):
+            raise ApiError(409, "a scan is already running")
+        try:
+            rows = devices.survey(store, probe_ports=probe, skip=[radio.collector.connected_port])
+        finally:
+            scan_lock.release()
+        connected = getattr(radio.collector, "connected_hwid", None)
+        for r in rows:
+            r["connected"] = connected is not None and r["hardware_id"] == connected
+        return {"radios": rows, "kinds": devices.KINDS}
+
+    def radio_link(c, b, q):
+        from . import devices
+
+        args = body_args(b, "hardware_id", "kind", optional=("label", "node"))
+        try:
+            return {"link": devices.link(store, args["hardware_id"], args["kind"], label=args.get("label"),
+                                         node=args.get("node"))}
+        except ValueError as ex:
+            raise ApiError(400, str(ex)) from ex
+
+    def radio_unlink(c, b, q):
+        from . import devices
+
+        if not devices.unlink(store, body_args(b, "hardware_id")["hardware_id"]):
+            raise ApiError(404, "that radio isn't linked")
+        return {"ok": True}
+
     # (method, path) -> (scope, handler(caller, body, query)). Scopes: read, send; config (another app
     # with the config scope may do it now; it can't add airtime); approve (the app does it now; another
     # app with config scope gets it queued for your approval); owner (only the app, ever). A scope can
     # be a function of (caller, body) when it depends on what's asked.
     routes = {
         ("GET", "/api/status"): ("read", lambda c, b, q: radio.status()),
+        ("GET", "/api/radios"): ("owner", lambda c, b, q: radios(probe=False)),
+        ("POST", "/api/radios/scan"): ("owner", lambda c, b, q: radios(probe=True)),
+        ("POST", "/api/radios/link"): ("owner", radio_link),
+        ("POST", "/api/radios/unlink"): ("owner", radio_unlink),
         ("GET", "/api/nodes"): ("read", nodes),
         ("GET", "/api/messages"): ("read", messages),
         ("GET", "/api/packets"): ("read", lambda c, b, q: {"packets": _rows(

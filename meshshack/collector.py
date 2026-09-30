@@ -1,12 +1,18 @@
-"""Holds the USB connection to the radio and feeds everything it hears into the Store."""
+"""Holds the USB connection to the radio and feeds everything it hears into the Store.
+
+Which radio: the one given with --port, else the one linked as this station's Meshtastic radio
+(found by hardware ID wherever it's plugged in; see devices.py), else the only unlinked
+Meshtastic-looking device, which then gets linked so it's found again next time.
+"""
 
 import logging
+import os
 
 import meshtastic.serial_interface
 import meshtastic.util
 from pubsub import pub
 
-from . import alerts
+from . import alerts, devices
 from .events import packet_event
 from .store import hops_taken
 
@@ -19,10 +25,12 @@ class Collector:
         self.bus = bus  # optional EventBus for the API's live stream
         self.port = port
         self.retry_seconds = retry_seconds
-        self._warned_no_port = False
+        self._last_warning = None  # log each "can't pick a radio" situation once, not every retry
         # The live interface while connected, for the API to send through; None otherwise.
         self.iface = None
         self.connected_port = None
+        self.connected_hwid = None
+        self._switching = False  # the link changed: reconnect now instead of after the retry wait
 
     def run(self, stop):
         """Connect, log until the connection drops, reconnect. Returns once `stop` is set."""
@@ -37,27 +45,55 @@ class Collector:
                     self.iface = iface
                     self._publish({"type": "connection", "connected": True, "port": self.connected_port})
                     self._watch(iface, stop)
-                    self.iface = self.connected_port = None
+                    self.iface = self.connected_port = self.connected_hwid = None
                     self._publish({"type": "connection", "connected": False})
                     self._close(iface)
-                if not stop.is_set():
+                if self._switching:
+                    self._switching = False
+                elif not stop.is_set():
                     stop.wait(self.retry_seconds)
         finally:
             pub.unsubscribe(self.on_receive, "meshtastic.receive")
             pub.unsubscribe(self.on_node_updated, "meshtastic.node.updated")
 
+    def _warn(self, message):
+        if message != self._last_warning:
+            log.warning(message)
+            self._last_warning = message
+
     def _find_port(self):
         if self.port:
             return self.port
-        ports = meshtastic.util.findPorts(True)
-        if len(ports) == 1:
-            self._warned_no_port = False
-            return ports[0]
-        if len(ports) > 1:
-            log.error("Multiple serial devices found (%s); choose one with --port", ", ".join(ports))
-        elif not self._warned_no_port:
-            log.warning("No Meshtastic device found; will keep checking every %ss", self.retry_seconds)
-            self._warned_no_port = True
+        ports = devices.scan()
+        wanted = devices.linked(self.store, "meshtastic")
+        if wanted:
+            found = devices.find(wanted, ports)
+            if found:
+                self._last_warning = None
+                return found["port"]
+            self._warn(f"The linked Meshtastic radio ({wanted}) isn't plugged in; waiting for it "
+                       f"(checking every {self.retry_seconds}s)")
+            return None
+        # Nothing linked yet: only a device that looks like a Meshtastic radio and isn't linked as
+        # something else (a MeshCore radio is an ESP32 too).
+        taken = set(devices.links(self.store))
+        likely = set(meshtastic.util.findPorts(True))
+        candidates = [p for p in ports if p["port"] in likely and p["hardware_id"] not in taken]
+        if len(candidates) == 1:
+            self._last_warning = None
+            return candidates[0]["port"]
+        if candidates:
+            self._warn(f"Several possible radios ({', '.join(p['port'] for p in candidates)}): choose one with "
+                       "Scan in the Device tab, `meshshack radios link`, or --port")
+        else:
+            self._warn(f"No Meshtastic device found; will keep checking every {self.retry_seconds}s")
+        return None
+
+    def _hardware_id(self, port):
+        real = os.path.realpath(port)
+        for p in devices.scan():
+            if os.path.realpath(p["port"]) == real:
+                return p["hardware_id"]
         return None
 
     def _connect(self):
@@ -85,13 +121,35 @@ class Collector:
         for node in list((iface.nodesByNum or {}).values()):
             self.store.record_node_info(node)
         self.connected_port = port
+        self.connected_hwid = self._hardware_id(port)
+        linked = devices.linked(self.store, "meshtastic")
+        if self.connected_hwid and not linked:
+            devices.link(self.store, self.connected_hwid, "meshtastic", label=user.get("longName"), node=user.get("id"))
+            log.info("Linked this radio (hardware ID %s) as the station's Meshtastic radio; it will be found "
+                     "by that ID from now on, whichever USB port it's in", self.connected_hwid)
+        elif linked == self.connected_hwid:
+            devices.describe(self.store, linked, label=user.get("longName"), node=user.get("id"))
         return iface
+
+    def _link_changed(self):
+        """True when a different radio has been linked than the one we're connected to."""
+        if self.port:
+            return False
+        wanted = devices.linked(self.store, "meshtastic")
+        return wanted is not None and wanted != self.connected_hwid
 
     def _watch(self, iface, stop):
         # The library clears isConnected when the reader thread dies (unplugged) or the
         # radio reboots. Either way we tear down and reconnect from scratch.
+        ticks = 0
         while not stop.is_set() and iface.isConnected.is_set():
             stop.wait(1)
+            ticks += 1
+            if ticks % 5 == 0 and self._link_changed():
+                log.info("A different radio was linked; switching to it")
+                self.store.record_event("disconnected", "switching to the newly linked radio")
+                self._switching = True
+                return
         if not stop.is_set():
             log.warning("Connection lost")
             self.store.record_event("disconnected", "connection lost")

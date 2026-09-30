@@ -19,6 +19,16 @@ ALICE = 0xA1B2C3D4
 BOB = 0x0BADBEEF
 
 
+@pytest.fixture(autouse=True)
+def fake_usb(monkeypatch):
+    """The collector looks radios up by hardware ID; never let tests see real USB devices."""
+    from meshshack import devices
+
+    monkeypatch.setattr(devices, "scan", lambda list_ports=None: [
+        {"port": "/dev/ttyACM0", "stable_path": None, "hardware_id": "TEST0001", "vid": 0x303A, "pid": 0x1001,
+         "description": "test radio", "location": None}])
+
+
 @pytest.fixture
 def store(tmp_path):
     s = Store(tmp_path / "test.db")
@@ -215,7 +225,7 @@ def test_reconnects_after_connection_loss(store, monkeypatch):
 
     assert not thread.is_alive()
     assert all(i.closed for i in FakeSerialInterface.instances)
-    kinds = [e["kind"] for e in store.events()]
+    kinds = [e["kind"] for e in store.events() if e["kind"] != "radio"]  # "radio": linked on first connect
     assert kinds[:3] == ["connected", "disconnected", "connected"]
     assert store.nodes()[0]["short_name"] == "ALB"  # node DB snapshot taken on connect
 

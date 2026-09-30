@@ -229,6 +229,44 @@ def cmd_token(args, store):
         )
 
 
+def cmd_radios(args, store):
+    from . import devices
+
+    if args.action == "link":
+        if not args.hardware_id or not args.kind:
+            sys.exit("usage: meshshack radios link HARDWARE_ID --as meshtastic|meshcore")
+        devices.link(store, args.hardware_id, args.kind)
+        print(f"Linked {devices.hardware_id(args.hardware_id)} as the {devices.KINDS[args.kind]} radio.")
+        if args.kind == "meshtastic":
+            print("A running logger switches to it within a few seconds.")
+        return
+    if args.action == "unlink":
+        if not args.hardware_id:
+            sys.exit("usage: meshshack radios unlink HARDWARE_ID")
+        found = devices.unlink(store, args.hardware_id)
+        print("Unlinked." if found else "That radio isn't linked.")
+        return
+    rows = devices.survey(store, probe_ports=args.probe)
+
+    def firmware(r):
+        if r.get("in_use"):
+            return "(in use)"
+        pr = r.get("probe")
+        if pr is None:
+            return None
+        return f"{devices.KINDS[pr['kind']]} {pr['node']}" if pr["kind"] else f"? {pr['error']}"
+
+    print_table(
+        ["hardware id", "port", "linked as", "node", "answers as", "device"],
+        [[r["hardware_id"], r["port"] or "not plugged in",
+          devices.KINDS[r["link"]["kind"]] if r["link"] else None, (r["link"] or {}).get("node"),
+          firmware(r), r["description"]] for r in rows],
+    )
+    if not args.probe:
+        print("\n--probe asks each free port what firmware it runs (nothing is transmitted; "
+              "some boards restart when their port is opened).")
+
+
 def cmd_export(args, store):
     from .export import EXPORTS
 
@@ -366,6 +404,13 @@ def build_parser():
                    help="off blocks every transmission (and config change) until turned back on")
     p.add_argument("-n", "--limit", type=int, default=20)
     p.set_defaults(func=cmd_tx)
+
+    p = sub.add_parser("radios", help="list radios on USB, and link them so they're found whichever port they're in")
+    p.add_argument("action", nargs="?", choices=["list", "link", "unlink"], default="list")
+    p.add_argument("hardware_id", nargs="?", help="as shown by `meshshack radios`")
+    p.add_argument("--as", dest="kind", choices=["meshtastic", "meshcore"], help="with link: what the radio is")
+    p.add_argument("--probe", action="store_true", help="ask each free port what firmware it runs")
+    p.set_defaults(func=cmd_radios)
 
     p = sub.add_parser("token", help="create, list or revoke tokens for other apps using the local API")
     p.add_argument("action", nargs="?", choices=["list", "create", "revoke"], default="list")

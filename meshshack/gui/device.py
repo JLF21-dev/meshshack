@@ -1,11 +1,12 @@
-"""Device tab: radio status, reboot/announce, and owner/role/position settings."""
+"""Device tab: which radios are plugged in, radio status, reboot/announce, and owner/role/position settings."""
 
 from html import escape
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout, QGridLayout, QGroupBox, QLabel,
-    QLineEdit, QMessageBox, QPushButton, QScrollArea, QSpinBox, QVBoxLayout, QWidget,
+    QAbstractItemView, QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout, QGridLayout, QGroupBox, QHBoxLayout,
+    QHeaderView, QLabel, QLineEdit, QMessageBox, QPushButton, QScrollArea, QSpinBox, QTableWidget,
+    QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 ROLE_HELP = {
@@ -43,12 +44,14 @@ class DeviceTab(QWidget):
 
         content = QWidget()
         grid = QGridLayout(content)
-        grid.addWidget(self._status_group(), 0, 0, 2, 1)
-        grid.addWidget(self._actions_group(), 0, 1)
-        grid.addWidget(self._owner_group(), 1, 1)
-        grid.addWidget(self._role_group(), 2, 0)
-        grid.addWidget(self._position_group(), 2, 1)
-        grid.addWidget(self._history_group(), 3, 0, 1, 2)
+        self.radios = RadiosGroup(win)
+        grid.addWidget(self.radios, 0, 0, 1, 2)
+        grid.addWidget(self._status_group(), 1, 0, 2, 1)
+        grid.addWidget(self._actions_group(), 1, 1)
+        grid.addWidget(self._owner_group(), 2, 1)
+        grid.addWidget(self._role_group(), 3, 0)
+        grid.addWidget(self._position_group(), 3, 1)
+        grid.addWidget(self._history_group(), 4, 0, 1, 2)
         grid.setColumnStretch(0, 1)
         grid.setColumnStretch(1, 1)
 
@@ -194,7 +197,8 @@ class DeviceTab(QWidget):
             self.banner.show()
         elif not connected:
             self.banner.setText("The logger is running but the radio isn't connected. It will reconnect "
-                                "automatically (after a reboot this takes a few seconds).")
+                                "automatically (after a reboot this takes a few seconds). If it doesn't, "
+                                "check Radios below: Scan, then link your Meshtastic radio.")
             self.banner.show()
         else:
             self.banner.hide()
@@ -352,3 +356,207 @@ class DeviceTab(QWidget):
             summary.append("Fixed position: remove")
         if self._confirm("Position settings", "Apply these position settings?\n\n" + "\n".join(summary)):
             self._post("/api/config/position", body, "Position settings updated", form="position")
+
+
+class RadiosGroup(QGroupBox):
+    """The radios on USB, and which one is which. Linking is by hardware ID, so a linked radio is
+    found again whichever USB socket it's moved to."""
+
+    COLUMNS = ["Radio (hardware ID)", "USB port", "Linked as", "Node", "Answers as", "Device"]
+
+    def __init__(self, win):
+        super().__init__("Radios")
+        self.win = win
+        self.rows = []
+        self.kinds = {"meshtastic": "Meshtastic", "meshcore": "MeshCore"}
+        self._probes = {}  # hardware ID -> last probe, kept across refreshes
+        self._seen = None  # (connected, hardware ID) the table was last refreshed for
+
+        note = QLabel("Each radio is known by its hardware ID, which stays the same whichever USB socket it's "
+                      "in. The logger uses the radio linked as Meshtastic. Scan asks each free radio what "
+                      "firmware it runs; nothing is transmitted, though some boards restart when asked.")
+        note.setWordWrap(True)
+        note.setStyleSheet("color: gray")
+        self.table = QTableWidget(0, len(self.COLUMNS))
+        self.table.setHorizontalHeaderLabels(self.COLUMNS)
+        self.table.verticalHeader().hide()
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.setMaximumHeight(150)
+        self.table.itemSelectionChanged.connect(self._update_buttons)
+
+        self.scan_button = QPushButton("Scan")
+        self.scan_button.clicked.connect(self.scan)
+        self.link_mt = QPushButton("Link as Meshtastic…")
+        self.link_mt.clicked.connect(lambda: self._link("meshtastic"))
+        self.link_mc = QPushButton("Link as MeshCore…")
+        self.link_mc.clicked.connect(lambda: self._link("meshcore"))
+        self.unlink_button = QPushButton("Unlink…")
+        self.unlink_button.clicked.connect(self._unlink)
+        buttons = QHBoxLayout()
+        for b in (self.scan_button, self.link_mt, self.link_mc, self.unlink_button):
+            buttons.addWidget(b)
+        buttons.addStretch(1)
+        self.message = QLabel()
+        self.message.setWordWrap(True)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(note)
+        layout.addWidget(self.table)
+        layout.addLayout(buttons)
+        layout.addWidget(self.message)
+        win.statusChanged.connect(self._status_changed)
+        self._status_changed(win.status)
+
+    def _status_changed(self, status):
+        key = (bool(status.get("connected")), status.get("hardware_id"), bool(status.get("hub_error")))
+        if key != self._seen:
+            self._seen = key
+            self.refresh()
+        self._update_buttons()
+
+    def refresh(self):
+        self.win.hub.get("/api/radios", self._loaded)
+
+    def scan(self):
+        self.scan_button.setEnabled(False)
+        self.scan_button.setText("Scanning…")
+        self.message.setText("Asking each free radio what it is (a few seconds each)…")
+        self.win.hub.post("/api/radios/scan", {}, self._scanned)
+
+    def _scanned(self, result, error):
+        self.scan_button.setText("Scan")
+        if result:
+            for r in result["radios"]:
+                if r.get("probe") and r["hardware_id"]:
+                    self._probes[r["hardware_id"]] = r["probe"]
+        self._loaded(result, error)
+        if not error:
+            self.message.setText(self._advice())
+
+    def _loaded(self, result, error):
+        if error:
+            self.rows = []
+            self.message.setText(f"Can't list radios: {error}")
+        else:
+            self.rows = result["radios"]
+            self.kinds = result.get("kinds") or self.kinds
+            if not self.message.text().startswith(("Linked", "Unlinked")):
+                self.message.setText("")
+        self._fill()
+        self._update_buttons()
+
+    def _answers_as(self, r):
+        if r.get("connected"):
+            return "Meshtastic (connected now)"
+        if r.get("in_use"):
+            return "In use by another program"
+        probe = self._probes.get(r["hardware_id"])
+        if not r["present"] or probe is None:
+            return ""
+        if probe.get("kind"):
+            return f"{self.kinds[probe['kind']]} {probe.get('node') or ''}".strip()
+        return f"Unknown: {probe.get('error')}"
+
+    def _fill(self):
+        selected = self._selected()
+        self.table.setRowCount(len(self.rows))
+        for i, r in enumerate(self.rows):
+            link = r.get("link") or {}
+            values = [r["hardware_id"] or "(none reported)", r["port"] or "Not plugged in",
+                      self.kinds.get(link.get("kind"), ""), link.get("node") or "", self._answers_as(r),
+                      r.get("description") or ""]
+            for col, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                if not r["present"]:
+                    item.setForeground(Qt.gray)
+                self.table.setItem(i, col, item)
+            if selected and r["hardware_id"] == selected["hardware_id"]:
+                self.table.selectRow(i)
+
+    def _advice(self):
+        found = [(r, self._probes.get(r["hardware_id"])) for r in self.rows if r["present"]]
+        unlinked = [(r, p) for r, p in found if not r.get("link") and p and p.get("kind")]
+        if unlinked:
+            names = ", ".join(f"{r['port']} ({self.kinds[p['kind']]})" for r, p in unlinked)
+            return f"Not linked yet: {names}. Select one and link it as what it answered."
+        return "Scan finished."
+
+    def _selected(self):
+        rows = self.table.selectionModel().selectedRows() if self.table.selectionModel() else []
+        return self.rows[rows[0].row()] if rows and rows[0].row() < len(self.rows) else None
+
+    def _update_buttons(self):
+        hub_ok = not self.win.status.get("hub_error")
+        r = self._selected()
+        self.scan_button.setEnabled(hub_ok and self.scan_button.text() == "Scan")
+        can_link = hub_ok and r is not None and bool(r["hardware_id"])
+        kind = (r or {}).get("link", None) and r["link"].get("kind")
+        self.link_mt.setEnabled(can_link and kind != "meshtastic")
+        self.link_mc.setEnabled(can_link and kind != "meshcore" and not (r or {}).get("connected"))
+        self.unlink_button.setEnabled(hub_ok and r is not None and bool(r.get("link")))
+
+    def _link(self, kind):
+        r = self._selected()
+        if r is None:
+            return
+        probe = self._probes.get(r["hardware_id"]) or {}
+        if probe.get("kind") and probe["kind"] != kind:
+            mismatch = (f"\n\nThis radio answered the last scan as {self.kinds[probe['kind']]}, "
+                        f"not {self.kinds[kind]}.")
+        elif not probe.get("kind") and not r.get("connected"):
+            mismatch = "\n\nIt hasn't been scanned, so what it runs isn't confirmed. Consider Scan first."
+        else:
+            mismatch = ""
+        if kind == "meshtastic":
+            effect = ("The logger will switch to this radio within a few seconds, and everything MeshShack sends "
+                      "will go out through it. Any other radio linked as Meshtastic is unlinked.")
+        else:
+            effect = ("MeshShack doesn't log MeshCore traffic yet; linking reserves this radio so the "
+                      "Meshtastic logger always leaves it alone.")
+        where = r["port"] or "not plugged in"
+        if QMessageBox.question(self, "Link radio", f"Link {r['hardware_id']} ({where}) as the "
+                                f"{self.kinds[kind]} radio?\n\n{effect}{mismatch}",
+                                QMessageBox.Yes | QMessageBox.Cancel, QMessageBox.Cancel) != QMessageBox.Yes:
+            return
+        body = {"hardware_id": r["hardware_id"], "kind": kind}
+        if probe.get("kind") == kind:
+            body["node"] = probe.get("node")
+            body["label"] = (probe.get("detail") or {}).get("name")
+        elif r.get("connected"):
+            node = self.win.status.get("node") or {}
+            body["node"], body["label"] = node.get("id"), node.get("long_name")
+
+        def done(result, error):
+            if error:
+                QMessageBox.warning(self, "Link radio", f"That didn't work: {error}")
+                return
+            self.message.setText(f"Linked {r['hardware_id']} as the {self.kinds[kind]} radio.")
+            self.refresh()
+            self.win.poll_status()
+
+        self.win.hub.post("/api/radios/link", body, done)
+
+    def _unlink(self):
+        r = self._selected()
+        if r is None or not r.get("link"):
+            return
+        extra = ""
+        if r["link"].get("kind") == "meshtastic":
+            extra = ("\n\nThe logger stays connected for now. After it next restarts, it only picks a radio "
+                     "on its own when exactly one possible Meshtastic radio is plugged in.")
+        if QMessageBox.question(self, "Unlink radio", f"Unlink {r['hardware_id']}?{extra}",
+                                QMessageBox.Yes | QMessageBox.Cancel, QMessageBox.Cancel) != QMessageBox.Yes:
+            return
+
+        def done(result, error):
+            if error:
+                QMessageBox.warning(self, "Unlink radio", f"That didn't work: {error}")
+                return
+            self.message.setText(f"Unlinked {r['hardware_id']}.")
+            self.refresh()
+
+        self.win.hub.post("/api/radios/unlink", {"hardware_id": r["hardware_id"]}, done)

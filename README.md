@@ -82,8 +82,10 @@ appears, try another USB cable, since many are power-only.
 ## Usage
 
 ```bash
-.venv/bin/meshshack run                     # auto-detect the radio and log until Ctrl-C
+.venv/bin/meshshack run                     # find the radio and log until Ctrl-C
 .venv/bin/meshshack run --port /dev/ttyACM0 # or name the port
+.venv/bin/meshshack radios --probe          # radios on USB, and what firmware each runs
+.venv/bin/meshshack radios link 240AC4000001 --as meshtastic
 
 .venv/bin/meshshack nodes --since 24h       # who's been heard, with SNR/RSSI/hops/battery
 .venv/bin/meshshack messages -n 20          # recent text messages
@@ -103,6 +105,23 @@ appears, try another USB cable, since many are power-only.
 The database defaults to `~/.local/share/meshshack/meshshack.db`; override it with
 `--db PATH` or the `MESHSHACK_DB` environment variable. Query commands can run
 while the logger is running.
+
+### More than one radio
+
+Each radio is known by its hardware ID, the chip's MAC address, which ESP32 boards
+report as their USB serial number. It stays the same whichever USB socket the radio
+is in and whatever firmware it runs, so `/dev/ttyACM0` can become `/dev/ttyACM3`
+without anything breaking. The logger uses the radio linked as Meshtastic; the first
+time it connects to one, it links it. With several possible radios plugged in and
+none linked, it waits for you to choose rather than guess. Link, unlink and scan in
+the Device tab's **Radios** section or with `meshshack radios`. A radio linked as
+MeshCore is never touched by the Meshtastic logger (MeshCore logging itself is on the
+roadmap).
+
+Scanning only asks each free radio what it is, over the USB cable; nothing is
+transmitted. It skips the port the logger holds. Boards whose USB is the ESP32's own
+(MeshCore on a Heltec V4, for one) restart when their port is opened, and come back
+a few seconds later.
 
 Only one program can hold the USB port at a time. While `meshshack run` is
 connected, use the phone app over Bluetooth, not USB tools like the
