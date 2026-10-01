@@ -7,6 +7,8 @@ Runs in the logger (so alerts are caught while the app is closed) on every recei
 - Keywords (whole words, any case), editable; SOS, MAYDAY, EMERGENCY, HELP ME and 911 by default.
 - Optionally, detection-sensor messages (off by default: those are usually doors and motion).
 
+Messages from the MeshCore radio get the same bell and keyword checks (check_meshcore).
+
 Alerts heard only through MQTT (the internet) are recorded but not "loud" unless the rules say
 so. Loud alerts are the ones the app sounds an alarm for. The rules live in the database, so
 the logger and the app agree on them.
@@ -62,7 +64,11 @@ def detect(packet, rule_set, local=False):
         return "Detection sensor" if rule_set["detection_sensors"] else None
     if port != "TEXT_MESSAGE_APP":
         return None
-    text = packet_text(packet)
+    return text_reason(packet_text(packet), rule_set)
+
+
+def text_reason(text, rule_set):
+    """Why a text message looks like an emergency (the alert bell, or a keyword), or None."""
     if BELL in text:
         return "Alert bell"
     for keyword in rule_set["keywords"]:
@@ -70,6 +76,25 @@ def detect(packet, rule_set, local=False):
         if pattern is not None and pattern.search(text):
             return f"Keyword: {keyword.upper()}"
     return None
+
+
+def check_meshcore(store, message_id, text, sender=None, channel=None, channel_name=None, now=None):
+    """The same check for a message the MeshCore radio received. MeshCore has no internet
+    gateways feeding the mesh the way Meshtastic's MQTT does, so these are always loud."""
+    rule_set = rules(store)
+    if not rule_set["enabled"]:
+        return None
+    reason = text_reason(text or "", rule_set)
+    if reason is None:
+        return None
+    where = f"#{channel_name or channel}" if channel is not None else "direct message"
+    alert = {
+        "at": now or time.time(), "network": "meshcore", "mc_message": message_id, "sender": sender,
+        "channel": channel, "portnum": "MESHCORE_TEXT", "reason": f"{reason} (MeshCore {where})",
+        "text": (text or "").replace(BELL, "").strip(), "via_mqtt": False, "loud": True,
+    }
+    alert["id"] = store.record_alert(alert)
+    return alert
 
 
 def check(store, packet, row, local=False, now=None):

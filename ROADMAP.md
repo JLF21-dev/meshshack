@@ -105,7 +105,7 @@ in at send time from data sources, including external APIs. Proposed shape:
 **MeshCore** (a second radio running MeshCore companion firmware, alongside Meshtastic)
 - [x] Step 1, receive only: log contacts, adverts and heard packets (own tables, keyed by
   public key); MeshCore nodes on the map (Meshtastic / MeshCore / Both) and in Nodes.
-- [ ] Step 2: MeshCore chat, read only: Public, hashtag channels, direct messages, kept
+- [x] Step 2: MeshCore chat, read only (its own labeled section in Chat; emergency alerts too): Public, hashtag channels, direct messages, kept
   separate from Meshtastic conversations.
 - [ ] Step 3: sending, manual only, through the airtime gatekeeper with its own budget;
   the kill switch covers both radios.

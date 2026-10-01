@@ -1,4 +1,10 @@
-"""Chat tab: conversation list (channels and direct messages), thread view, and send box."""
+"""Chat tab: conversation list (channels and direct messages), thread view, and send box.
+
+Meshtastic and MeshCore conversations are listed in separate, labeled sections and never mixed:
+the two are different meshes. MeshCore is receive-only for now, so its threads have no send box.
+Conversations are (kind, key): ("channel", index) and ("dm", node number) for Meshtastic;
+("mc_channel", slot) and ("mc_dm", sender key prefix) for MeshCore.
+"""
 
 import time
 from html import escape
@@ -27,6 +33,22 @@ STATUS_MARKS = {
 
 def conv_key(kind, key):
     return f"{kind}:{key}"
+
+
+def is_meshcore(conv):
+    return conv[0].startswith("mc_")
+
+
+class SectionItem(QListWidgetItem):
+    """A network's heading in the conversation list; not selectable."""
+
+    def __init__(self, text):
+        super().__init__(text)
+        self.setFlags(Qt.NoItemFlags)
+        font = self.font()
+        font.setBold(True)
+        font.setPointSizeF(font.pointSizeF() * 0.85)
+        self.setFont(font)
 
 
 class ChatTab(QWidget):
@@ -117,6 +139,11 @@ class ChatTab(QWidget):
         self.input.setFocus()
 
     def _conversation_title(self, kind, key):
+        if kind == "mc_channel":
+            return f"# {self._meshcore_channels().get(key) or f'Channel {key}'}"
+        if kind == "mc_dm":
+            row = self.store.mc_node_by_prefix(key)
+            return f"@ {row['name'] if row is not None and row['name'] else key[:8]}"
         if kind == "channel":
             for ch in self.win.status.get("channels", []):
                 if ch["index"] == key:
@@ -140,12 +167,43 @@ class ChatTab(QWidget):
             convs.append(self.current)
         return convs
 
+    def _meshcore_channels(self):
+        """{slot: name} of the MeshCore radio's channels: live while it's connected, else as last seen,
+        plus any channel that has messages."""
+        mc = self.win.status.get("meshcore") or {}
+        if mc.get("connected"):
+            channels = {c["index"]: c["name"] for c in mc.get("channels", [])}
+        else:
+            saved = (self.store.station("meshcore_radio") or {}).get("channels") or {}
+            channels = {int(k): v for k, v in saved.items()}
+        for row in self.store.mc_conversations():
+            if row["kind"] == "mc_channel" and row["key"] is not None:
+                channels.setdefault(int(row["key"]), row["channel_name"])
+        return channels
+
+    def _meshcore_conversations(self):
+        """MeshCore conversations, or none when there's no MeshCore radio and nothing logged."""
+        mc = self.win.status.get("meshcore") or {}
+        channels = self._meshcore_channels()
+        if not channels and not mc.get("linked") and not mc.get("connected"):
+            return []
+        convs = [("mc_channel", i) for i in sorted(channels)] or [("mc_channel", 0)]
+        for row in self.store.mc_conversations():
+            conv = (row["kind"], int(row["key"]) if row["kind"] == "mc_channel" else row["key"])
+            if conv not in convs:
+                convs.append(conv)
+        return convs
+
     def _read_marker(self, conv):
         return int(self.win.settings.value(f"read/{conv_key(*conv)}", 0))
 
     def _unread(self, conv):
         kind, key = conv
         marker = self._read_marker(conv)
+        if kind == "mc_channel":
+            return self.store.mc_unread_count(channel=key, after_id=marker)
+        if kind == "mc_dm":
+            return self.store.mc_unread_count(prefix=key, after_id=marker)
         if kind == "channel":
             return self.store.unread_count(channel=key, after_id=marker)
         return self.store.unread_count(peer=key, after_id=marker)
@@ -153,33 +211,43 @@ class ChatTab(QWidget):
     # ---- refresh ----
 
     def refresh(self):
-        convs = self._conversations()
+        mc_convs = self._meshcore_conversations()
+        convs = [c for c in self._conversations() if not is_meshcore(c)]
+        if is_meshcore(self.current) and self.current not in mc_convs:
+            mc_convs.append(self.current)
         self.conv_list.blockSignals(True)
         self.conv_list.clear()
         total_unread = 0
-        for conv in convs:
-            unread = 0 if conv == self.current and self._is_being_read() else self._unread(conv)
-            total_unread += unread
-            title = self._conversation_title(*conv)
-            item = QListWidgetItem(f"{title}  ({unread})" if unread else title)
-            item.setData(Qt.UserRole, conv)
-            if unread:
-                font = item.font()
-                font.setBold(True)
-                item.setFont(font)
-            self.conv_list.addItem(item)
-            if conv == self.current:
-                self.conv_list.setCurrentItem(item)
+        sections = [("MESHTASTIC", convs)] + ([("MESHCORE", mc_convs)] if mc_convs else [])
+        for heading, section in sections:
+            self.conv_list.addItem(SectionItem(heading))
+            for conv in section:
+                total_unread += self._add_conversation(conv)
         self.conv_list.blockSignals(False)
         self._render_thread()
         self.unreadChanged.emit(total_unread)
         self._update_send_state()
 
+    def _add_conversation(self, conv):
+        """Add one conversation to the list; returns its unread count."""
+        unread = 0 if conv == self.current and self._is_being_read() else self._unread(conv)
+        title = "    " + self._conversation_title(*conv)
+        item = QListWidgetItem(f"{title}  ({unread})" if unread else title)
+        item.setData(Qt.UserRole, conv)
+        if unread:
+            font = item.font()
+            font.setBold(True)
+            item.setFont(font)
+        self.conv_list.addItem(item)
+        if conv == self.current:
+            self.conv_list.setCurrentItem(item)
+        return unread
+
     def _is_being_read(self):
         return self.isVisible() and self.window().isActiveWindow()
 
     def _on_select(self, item, _previous):
-        if item is not None:
+        if item is not None and item.data(Qt.UserRole) is not None:
             self.current = item.data(Qt.UserRole)
             self.refresh()
 
@@ -197,12 +265,17 @@ class ChatTab(QWidget):
             # Remember how far you'd read before this view marks the conversation read.
             self._opened_marker = self._read_marker(self.current)
             self._clear_reply()
-        rows = self.store.thread(channel=key) if kind == "channel" else self.store.thread(peer=key)
+        if kind == "mc_channel":
+            rows = self.store.mc_thread(channel=key)
+        elif kind == "mc_dm":
+            rows = self.store.mc_thread(prefix=key)
+        else:
+            rows = self.store.thread(channel=key) if kind == "channel" else self.store.thread(peer=key)
         if rows and self._is_being_read():
             self.win.settings.setValue(f"read/{conv_key(kind, key)}", rows[-1]["id"])
 
         self._render_header()
-        signature = tuple((r["id"], r["status"]) for r in rows)
+        signature = tuple((r["id"], r["status"] if "status" in r.keys() else None) for r in rows)
         if self._rendered == (self.current, signature):
             return
         self._rendered = (self.current, signature)
@@ -210,7 +283,8 @@ class ChatTab(QWidget):
         bar = self.view.verticalScrollBar()
         at_bottom = bar.value() >= bar.maximum() - 4
         position = bar.value()
-        self.view.setHtml(self._thread_html(rows, self._opened_marker))
+        html = self._mc_thread_html if is_meshcore(self.current) else self._thread_html
+        self.view.setHtml(html(rows, self._opened_marker))
         if switched:
             self._scroll_to(self._opening_target(rows, self._opened_marker))
         else:  # new messages: stay at the bottom if you were there, otherwise don't move
@@ -251,11 +325,19 @@ class ChatTab(QWidget):
     def _render_header(self):
         kind, key = self.current
         title = escape(self._conversation_title(kind, key))
-        if kind == "channel":
-            detail = f"channel {key} · broadcast to everyone on this channel"
+        if kind == "mc_channel":
+            detail = f"MeshCore · channel {key} · everyone on this MeshCore channel · receive only in MeshShack"
+        elif kind == "mc_dm":
+            row = self.store.mc_node_by_prefix(key)
+            detail = f"MeshCore · direct message · key {key}…"
+            if row is not None:
+                detail += f" · heard {fmt_ago(row['last_heard'])}"
+            detail += " · receive only in MeshShack"
+        elif kind == "channel":
+            detail = f"Meshtastic · channel {key} · broadcast to everyone on this channel"
         else:
             row = self.store.node(key)
-            detail = f"direct message · !{key:08x}"
+            detail = f"Meshtastic · direct message · !{key:08x}"
             if row is not None:
                 detail += f" · heard {fmt_ago(row['last_heard'])}"
                 if row["hops_away"] is not None:
@@ -391,6 +473,55 @@ class ChatTab(QWidget):
             )
         return "".join(parts)
 
+    def _mc_thread_html(self, rows, unread_after=None):
+        """A MeshCore conversation: sender, text, and how it arrived. No replies or reactions:
+        MeshCore has neither, and MeshShack doesn't send on MeshCore yet."""
+        dark = self.palette().color(QPalette.Window).lightness() < 128
+        new_color = "#f28b82" if dark else "#c5221f"
+        in_bg = "#2d3138" if dark else "#eceff3"
+        meta_color = "#9aa0a6" if dark else "#5f6368"
+        if not rows:
+            return (f"<p style='color:{meta_color}' align='center'><br>No MeshCore messages here yet.<br>"
+                    "They appear as the MeshCore radio hears them.</p>")
+        divider_done = (unread_after is None or not any(m["id"] <= unread_after for m in rows)
+                        or not any(m["id"] > unread_after for m in rows))
+        parts, last_day = [], None
+        for m in rows:
+            if not divider_done and m["id"] > unread_after:
+                parts.append(f"<p align='center' style='color:{new_color}; font-weight:bold'>"
+                             f"─────  New messages  ─────</p>")
+                divider_done = True
+            parts.append(f"<a name='m{m['id']}'></a>")
+            day = time.strftime("%Y-%m-%d", time.localtime(m["logged_at"]))
+            if day != last_day:
+                parts.append(f"<p align='center' style='color:{meta_color}'>{escape(fmt_day(m['logged_at']))}</p>")
+                last_day = day
+            if m["channel"] is not None:
+                sender = m["sender"] or "?"
+            else:
+                row = self.store.mc_node_by_prefix(m["pubkey_prefix"] or "")
+                sender = row["name"] if row is not None and row["name"] else (m["pubkey_prefix"] or "?")[:8]
+            meta = [fmt_clock(m["logged_at"])]
+            if m["hops"] == 0:
+                meta.append("direct")
+                if m["snr"] is not None:
+                    meta.append(f"SNR {m['snr']:.1f} dB")
+            elif m["hops"] is not None:
+                meta.append(f"{m['hops']} hop{'s' if m['hops'] != 1 else ''}")
+                if m["snr"] is not None:
+                    meta.append(f"last repeater SNR {m['snr']:.1f} dB")
+            else:
+                meta.append("by a set route")
+            text = escape(m["text"] or "").replace("\n", "<br>")
+            if m["alert_reason"]:
+                text = f"<b style='color:{new_color}'>🚨 {escape(m['alert_reason'])}</b><br>{text}"
+            body = (f"<b>{escape(sender)}</b><br>{text}<br>"
+                    f"<span style='color:{meta_color}; font-size:small'>{escape(' · '.join(meta))}</span>")
+            parts.append(f"<table width='100%' cellspacing='0' cellpadding='2'><tr><td align='left'>"
+                         f"<table bgcolor='{in_bg}' cellpadding='7' cellspacing='0'><tr><td>{body}</td></tr></table>"
+                         f"</td></tr></table>")
+        return "".join(parts)
+
     # ---- replies and reactions ----
 
     def _message(self, packet_id):
@@ -451,12 +582,18 @@ class ChatTab(QWidget):
         over = size > MAX_TEXT_BYTES
         self.counter.setText(f"{size}/{MAX_TEXT_BYTES}")
         self.counter.setStyleSheet("color: #d93025; font-weight: bold" if over else "")
+        if is_meshcore(self.current):
+            self.input.setEnabled(False)
+            self.send_button.setEnabled(False)
+            self.input.setPlaceholderText("MeshCore is receive-only in MeshShack for now")
+            return
+        self.input.setEnabled(True)
         ready = self.win.radio_ready
         self.send_button.setEnabled(ready and 0 < len(self.input.text().strip()) and not over and not self._sending)
         self.input.setPlaceholderText("Type a message…" if ready else "Radio not connected — messages can't be sent")
 
     def _send(self):
-        if not self.send_button.isEnabled():
+        if not self.send_button.isEnabled() or is_meshcore(self.current):
             return
         body = {"text": self.input.text(), **self._destination()}
         if self._reply_to is not None:

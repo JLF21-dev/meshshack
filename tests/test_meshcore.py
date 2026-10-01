@@ -188,3 +188,52 @@ def test_gui_shows_meshcore_nodes(store, tmp_path):
         assert map_tab.count.text() == "1 MeshCore with a position"
     finally:
         win.close()
+
+
+def test_chat_keeps_networks_apart(store, tmp_path):
+    pytest.importorskip("PySide6")
+    import os
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+
+    from meshshack.gui.app import MainWindow
+
+    app = QApplication.instance() or QApplication([])
+    store.record_packet({"from": 0x0A0B0C0D, "to": 0xFFFFFFFF, "id": 7, "channel": 0, "rxSnr": 4.0, "hopStart": 3,
+                         "hopLimit": 3, "decoded": {"portnum": "TEXT_MESSAGE_APP", "text": "on meshtastic"}})
+    store.set_station("meshcore_radio", {"name": "TESTNODE", "channels": {"0": "Public"}})
+    row = store.mc_record_message({"type": "CHAN", "channel_idx": 0, "path_len": 0, "SNR": 7.5,
+                                   "text": "Tower: on meshcore, SOS"}, channel_name="Public")
+    from meshshack import alerts
+    alert = alerts.check_meshcore(store, row, "on meshcore, SOS", sender="Tower", channel=0, channel_name="Public")
+    assert alert["reason"] == "Keyword: SOS (MeshCore #Public)" and alert["loud"]
+    [a] = store.alerts()
+    assert (a["network"], a["from_short"], a["hops"], a["rx_snr"]) == ("meshcore", "Tower", 0, 7.5)
+
+    win = MainWindow(tmp_path / "test.db")
+    try:
+        chat = win.chat
+        chat.refresh()
+        titles = [chat.conv_list.item(i).text().strip() for i in range(chat.conv_list.count())]
+        assert titles[0] == "MESHTASTIC" and "MESHCORE" in titles
+        mc_at = titles.index("MESHCORE")
+        assert any(t.startswith("# Public") for t in titles[mc_at:])  # MeshCore's Public, in its own section
+        assert not any(t.startswith("# Public") for t in titles[:mc_at])
+
+        chat.current = ("mc_channel", 0)
+        chat.refresh()
+        text = chat.view.toPlainText()
+        assert "Tower" in text and "on meshcore" in text and "on meshtastic" not in text
+        assert "direct · SNR 7.5 dB" in text and "Keyword: SOS" in text
+        assert "MeshCore" in chat.header.text() and not chat.input.isEnabled()
+
+        chat.current = ("channel", 0)
+        chat.refresh()
+        assert "on meshtastic" in chat.view.toPlainText() and "on meshcore" not in chat.view.toPlainText()
+        assert "Meshtastic" in chat.header.text() and chat.input.isEnabled()
+
+        win.alert_center.current = store.alerts()[0]
+        win.alert_center._open()  # "Open" on a MeshCore alert goes to the MeshCore conversation
+        assert chat.current == ("mc_channel", 0) and win.tabs.currentWidget() is chat
+    finally:
+        win.close()

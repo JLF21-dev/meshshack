@@ -85,8 +85,9 @@ def test_main_window_without_logger(store, qapp, tmp_path):
         assert "hello &lt;b&gt;mesh&lt;/b&gt;" in html  # message text is escaped
         assert not win.chat.send_button.isEnabled()
 
-        titles = [win.chat.conv_list.item(i).text() for i in range(win.chat.conv_list.count())]
-        assert any(t.startswith("@ DST") for t in titles)
+        titles = [win.chat.conv_list.item(i).text().strip() for i in range(win.chat.conv_list.count())]
+        assert titles[0] == "MESHTASTIC" and any(t.startswith("@ DST") for t in titles)
+        assert "MESHCORE" not in titles  # no MeshCore radio and nothing from one: no section
 
         win.open_dm(DEST)
         assert "direct reply" in win.chat.view.toPlainText()

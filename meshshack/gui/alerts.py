@@ -111,7 +111,7 @@ class AlertCenter(QWidget):
             f"“{escape(self.current['text'] or '(no text)')}”"
             + (f"&nbsp;&nbsp;<i>+{more} more open</i>" if more else ""))
         self.ack_all_button.setVisible(more > 0)
-        self.open_button.setVisible(self.current["from_num"] is not None)
+        self.open_button.setVisible(self.current["from_num"] is not None or self.current["mc_message"] is not None)
         self.show()
         new = [a for a in open_alerts if a["id"] not in self._announced]
         if new:
@@ -169,7 +169,16 @@ class AlertCenter(QWidget):
 
     def _open(self):
         a = self.current
-        if a is None or a["from_num"] is None:
+        if a is None:
+            return
+        if a["mc_message"] is not None:  # a MeshCore message: its own conversation
+            self._stop_sound()
+            conv = ("mc_channel", a["channel"]) if a["channel"] is not None else ("mc_dm", a["mc_prefix"])
+            self.win.chat.current = conv
+            self.win.chat.refresh()
+            self.win.tabs.setCurrentWidget(self.win.chat)
+            return
+        if a["from_num"] is None:
             return
         self._stop_sound()
         direct = a["to_num"] is not None and a["to_num"] != 0xFFFFFFFF and a["to_num"] == self.win.my_num

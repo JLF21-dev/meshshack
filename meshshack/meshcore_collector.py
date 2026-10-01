@@ -14,7 +14,7 @@ import asyncio
 import logging
 import time
 
-from . import devices
+from . import alerts, devices
 
 log = logging.getLogger("meshshack")
 
@@ -190,13 +190,23 @@ class MeshCoreCollector:
         m = event.payload or {}
         try:
             channel = self.channels.get(m.get("channel_idx")) if m.get("type") == "CHAN" else None
-            self.store.mc_record_message(m, channel_name=channel)
+            row = self.store.mc_record_message(m, channel_name=channel)
         except Exception:
             log.exception("MeshCore: failed to record message")
             return
         where = f"#{channel}" if m.get("type") == "CHAN" else f"DM from {m.get('pubkey_prefix')}"
         log.info("MC message %s: %s", where, m.get("text"))
         self._publish({"type": "meshcore", "kind": "message"})
+        try:
+            saved = self.store.mc_message(row)
+            alert = alerts.check_meshcore(self.store, row, saved["text"], sender=saved["sender"],
+                                          channel=saved["channel"], channel_name=saved["channel_name"])
+        except Exception:
+            log.exception("MeshCore: alert check failed")
+            return
+        if alert is not None:
+            log.warning("ALERT (%s) from %s: %s", alert["reason"], alert["sender"] or "?", alert["text"])
+            self._publish({"type": "alert", **alert})
 
     def _publish(self, event):
         if self.bus is not None:

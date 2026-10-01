@@ -288,7 +288,7 @@ CREATE INDEX IF NOT EXISTS messages_logged_at ON messages (logged_at);
 CREATE INDEX IF NOT EXISTS messages_packet_id ON messages (packet_id);
 """
 
-SCHEMA_VERSION = 7  # v7: MeshCore tables (created by SCHEMA; nothing to migrate)
+SCHEMA_VERSION = 8  # v7: MeshCore tables (created by SCHEMA); v8: alerts from MeshCore too
 REQUEST_TIMEOUT = 180
 
 
@@ -396,6 +396,11 @@ class Store:
         if version < 6:
             with self._conn:
                 self._add_column("automation_runs", "subject", "INTEGER")
+        if version < 8:
+            with self._conn:
+                self._add_column("alerts", "network", "TEXT NOT NULL DEFAULT 'meshtastic'")
+                self._add_column("alerts", "sender", "TEXT")  # MeshCore: the name the message gave
+                self._add_column("alerts", "mc_message", "INTEGER")
         self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     def _add_column(self, table, column, decl):
@@ -656,10 +661,11 @@ class Store:
         with self._lock, self._conn:
             return self._conn.execute(
                 """INSERT INTO alerts (at, packet_row, packet_id, from_num, to_num, channel, portnum, reason, text,
-                       via_mqtt, loud) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (alert["at"], alert["packet_row"], alert["packet_id"], alert["from_num"], alert["to_num"],
-                 alert["channel"], alert["portnum"], alert["reason"], alert["text"], int(alert["via_mqtt"]),
-                 int(alert["loud"])),
+                       via_mqtt, loud, network, sender, mc_message) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (alert["at"], alert.get("packet_row"), alert.get("packet_id"), alert.get("from_num"),
+                 alert.get("to_num"), alert.get("channel"), alert.get("portnum"), alert["reason"], alert["text"],
+                 int(alert.get("via_mqtt", False)), int(alert["loud"]), alert.get("network", "meshtastic"),
+                 alert.get("sender"), alert.get("mc_message")),
             ).lastrowid
 
     def alerts(self, limit=200, open_only=False, loud_only=False):
@@ -670,9 +676,12 @@ class Store:
         if loud_only:
             where.append("a.loud = 1")
         return self._query(
-            f"""SELECT a.*, n.short_name AS from_short, n.long_name AS from_long, n.node_id AS from_id,
-                       p.rx_snr, p.hop_start - p.hop_limit AS hops
+            f"""SELECT a.*, COALESCE(n.short_name, a.sender) AS from_short, n.long_name AS from_long,
+                       COALESCE(n.node_id, CASE WHEN a.network = 'meshcore' THEN 'MeshCore' END) AS from_id,
+                       COALESCE(p.rx_snr, mm.snr) AS rx_snr, COALESCE(p.hop_start - p.hop_limit, mm.hops) AS hops,
+                       mm.pubkey_prefix AS mc_prefix
                 FROM alerts a LEFT JOIN nodes n ON n.num = a.from_num LEFT JOIN packets p ON p.id = a.packet_row
+                LEFT JOIN mc_messages mm ON mm.id = a.mc_message
                 WHERE {' AND '.join(where)} ORDER BY a.id DESC LIMIT ?""",
             (limit,),
         )
@@ -1375,10 +1384,42 @@ class Store:
                  None if path_len in (None, 255) else path_len, m.get("SNR")),
             ).lastrowid
 
+    def mc_conversations(self):
+        """MeshCore channels and direct-message senders that have messages, newest activity first.
+        A direct message's sender is known by the first 6 bytes of its public key."""
+        return self._query(
+            """SELECT CASE WHEN channel IS NULL THEN 'mc_dm' ELSE 'mc_channel' END AS kind,
+                      COALESCE(channel, pubkey_prefix) AS key, MAX(channel_name) AS channel_name,
+                      MAX(id) AS last_id, MAX(logged_at) AS last_at
+               FROM mc_messages GROUP BY kind, key ORDER BY last_at DESC""")
+
+    def mc_thread(self, channel=None, prefix=None, limit=500):
+        """One MeshCore conversation, oldest first: a channel slot, or a direct-message sender's key prefix."""
+        if prefix is not None:
+            where, params = "m.channel IS NULL AND m.pubkey_prefix = ?", [prefix]
+        else:
+            where, params = "m.channel = ?", [channel or 0]
+        rows = self._query(
+            f"""SELECT m.*, (SELECT reason FROM alerts a WHERE a.mc_message = m.id LIMIT 1) AS alert_reason
+                FROM mc_messages m WHERE {where} ORDER BY m.id DESC LIMIT ?""", [*params, limit])
+        return list(reversed(rows))
+
+    def mc_unread_count(self, channel=None, prefix=None, after_id=0):
+        if prefix is not None:
+            where, params = "channel IS NULL AND pubkey_prefix = ?", [prefix]
+        else:
+            where, params = "channel = ?", [channel or 0]
+        return self._query(f"SELECT COUNT(*) FROM mc_messages WHERE {where} AND direction = 'in' AND id > ?",
+                           [*params, after_id])[0][0]
+
     def mc_nodes(self, since=None):
         if since is None:
             return self._query("SELECT * FROM mc_nodes ORDER BY last_heard DESC NULLS LAST")
         return self._query("SELECT * FROM mc_nodes WHERE last_heard >= ? ORDER BY last_heard DESC", (since,))
+
+    def mc_message(self, message_id):
+        rows = self._query("SELECT * FROM mc_messages WHERE id = ?", (message_id,))
+        return rows[0] if rows else None
 
     def mc_node_by_prefix(self, prefix):
         rows = self._query("SELECT * FROM mc_nodes WHERE public_key LIKE ? LIMIT 2", (prefix.lower() + "%",))
