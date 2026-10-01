@@ -29,6 +29,8 @@ L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
   attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
 }).addTo(map);
 
+// MeshCore marker outline (in shapeSvg's 20x20 box). Defined before the legend, which draws it.
+const HEX = '10,1.5 17.5,5.75 17.5,14.25 10,18.5 2.5,14.25 2.5,5.75';
 const markers = new Map();  // node key (Meshtastic num, or 'mc:' + MeshCore public key) -> marker
 const trails = L.layerGroup().addTo(map);
 const areas = L.layerGroup().addTo(map);  // precision cells of rounded positions
@@ -74,8 +76,6 @@ function color(node) {
 // Shape = how the node's traffic reaches us (see paths.py); color = how recently.
 const SHAPE_FOR_PATH = { direct: 'circle', radio: 'circle', mqtt: 'square', inferred: 'square_q', both: 'triangle',
                          unknown: 'diamond' };
-
-const HEX = '10,1.5 17.5,5.75 17.5,14.25 10,18.5 2.5,14.25 2.5,5.75';
 
 function starPoints(cx, cy, outer, inner) {
   const pts = [];

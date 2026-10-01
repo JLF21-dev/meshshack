@@ -237,3 +237,60 @@ def test_chat_keeps_networks_apart(store, tmp_path):
         assert chat.current == ("mc_channel", 0) and win.tabs.currentWidget() is chat
     finally:
         win.close()
+
+
+def test_map_page_draws_both_networks(store, tmp_path):
+    """Load the real map page, feed it both networks' nodes, and count the markers it draws.
+    Any JavaScript error fails the test (a script error once left the map empty)."""
+    pytest.importorskip("PySide6")
+    import os
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", "--no-sandbox")
+    import time
+
+    from PySide6.QtWidgets import QApplication
+
+    from meshshack.gui.app import MainWindow
+
+    app = QApplication.instance() or QApplication([])
+    store.record_node_info({"num": 0x0A0B0C0D, "user": {"id": "!0a0b0c0d", "shortName": "MT1"},
+                            "position": {"latitude": HOME[0] + 0.02, "longitude": HOME[1]}})
+    store.record_packet({"from": 0x0A0B0C0D, "to": 0xFFFFFFFF, "id": 1, "rxSnr": 5.0, "hopStart": 3, "hopLimit": 3,
+                         "decoded": {"portnum": "TEXT_MESSAGE_APP", "text": "hi"}})
+    store.mc_record_packet(parsed(advert_packet(name="Tower", adv_type=2, lat=HOME[0] + 0.05, lon=HOME[1])))
+    win = MainWindow(tmp_path / "test.db")
+    errors = []
+    page = win.map.view.page()
+    original = page.javaScriptConsoleMessage
+
+    def console(level, message, line, source):
+        if "Error" in message:
+            errors.append(f"{message} (line {line})")
+        original(level, message, line, source)
+
+    page.javaScriptConsoleMessage = console
+    try:
+        win.show()
+        win.tabs.setCurrentWidget(win.map)
+        deadline = time.time() + 20
+        while not win.map._ready and time.time() < deadline:
+            app.processEvents()
+        assert win.map._ready, "map page didn't load"
+
+        def markers(network):
+            win.map.network_box.setCurrentIndex(win.map.network_box.findData(network))
+            win.map._dirty = True
+            win.map._push()
+            result = []
+            page.runJavaScript("document.querySelectorAll('.node-icon').length", 0, result.append)
+            end = time.time() + 10
+            while not result and time.time() < end:
+                app.processEvents()
+            return result[0] if result else None
+
+        assert markers("both") == 2
+        assert markers("meshtastic") == 1
+        assert markers("meshcore") == 1
+        assert not errors, errors
+    finally:
+        win.close()
