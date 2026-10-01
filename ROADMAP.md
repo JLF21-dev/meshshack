@@ -48,7 +48,7 @@ Picked up when work resumes. The ground rule above applies to every item.
   (a fixed node: position every 12–24 h, telemetry every 1–2 h).
 
 **Automation (roadmap step 5)**
-- [ ] Scheduler for informational messages: a weekly NIST/local time check,
+- [x] Scheduler for informational messages: a weekly NIST/local time check,
   a daily weather report. Each job is off until enabled, dry-run first, has
   random timing jitter, and is sent through the gatekeeper (each job at most
   every 6 h, 4 automated sends a day in total, paused above 20% channel
